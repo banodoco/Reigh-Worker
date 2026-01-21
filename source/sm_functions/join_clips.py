@@ -1156,9 +1156,13 @@ def _handle_join_clips_task(
                         # REPLACE mode: Remove gap frames from boundary, context remains and blends
                         # INSERT mode: Don't remove any frames, just insert transition
                         
-                        # For proper blending, blend over the full context region (or max safe if VACE returned fewer frames)
-                        blend_frames = min(context_frame_count, max_safe_blend)
-                        dprint(f"[JOIN_CLIPS] Task {task_id}: Blend frames: {blend_frames} (context={context_frame_count}, max_safe={max_safe_blend})")
+                        # For proper blending, blend over the context region (or max safe if VACE returned fewer frames)
+                        # VACE BOUNDARY ADJUSTMENT: Reduce blend by 1 frame to skip potentially
+                        # misaligned boundary frames. VACE may shift mask boundaries by 1 frame
+                        # during processing, causing context/gap boundary to not align perfectly.
+                        vace_boundary_adjustment = 1
+                        blend_frames = max(1, min(context_frame_count, max_safe_blend) - vace_boundary_adjustment)
+                        dprint(f"[JOIN_CLIPS] Task {task_id}: Blend frames: {blend_frames} (context={context_frame_count}, max_safe={max_safe_blend}, adjustment={vace_boundary_adjustment})")
                         
                         # Use pre-calculated gap sizes (gap_from_clip1, gap_from_clip2 from step 4)
                         frames_to_remove_clip1 = gap_from_clip1  # 0 for INSERT mode
@@ -1823,14 +1827,22 @@ def _handle_join_final_stitch(
                 # - clip[i] → transition[i]: context_from_clip1 (context from clip i in transition)
                 # - transition[i] → clip[i+1]: context_from_clip2 (context from clip i+1 in transition)
                 trans_info = transitions[i]
-                blend_clip_to_trans = trans_info.get("context_from_clip1", blend_frames)
-                blend_trans_to_clip = trans_info.get("context_from_clip2", blend_frames)
+                ctx1 = trans_info.get("context_from_clip1", blend_frames)
+                ctx2 = trans_info.get("context_from_clip2", blend_frames)
+
+                # VACE BOUNDARY ADJUSTMENT: Reduce blend by 1 frame to skip potentially
+                # misaligned boundary frames. VACE may shift mask boundaries by 1 frame
+                # during processing, causing context/gap boundary to not align perfectly.
+                # By blending over (context - 1) frames, we leave a 1-frame buffer.
+                vace_boundary_adjustment = 1
+                blend_clip_to_trans = max(1, ctx1 - vace_boundary_adjustment)
+                blend_trans_to_clip = max(1, ctx2 - vace_boundary_adjustment)
 
                 stitch_blends.append(blend_clip_to_trans)  # Blend between clip and transition
                 stitch_videos.append(transition_paths[i])
                 stitch_blends.append(blend_trans_to_clip)  # Blend between transition and next clip
 
-                dprint(f"[FINAL_STITCH] Task {task_id}: Crossfades for transition {i}: clip→trans={blend_clip_to_trans}, trans→clip={blend_trans_to_clip}")
+                dprint(f"[FINAL_STITCH] Task {task_id}: Crossfades for transition {i}: ctx1={ctx1}, ctx2={ctx2}, blend_clip→trans={blend_clip_to_trans}, blend_trans→clip={blend_trans_to_clip}")
 
         # --- 5b. FINAL FRAME ACCOUNTING ---
         # Show exactly how the final video will be composed
