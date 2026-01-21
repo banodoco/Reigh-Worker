@@ -1493,7 +1493,8 @@ def get_task_output_location_from_db(task_id_to_find: str) -> str | None:
             context_id=task_id_to_find,
             timeout=30,
             max_retries=3,
-            method="POST"
+            method="POST",
+            retry_on_404_patterns=["not found", "Task not found"],  # Handle race conditions
         )
 
         if edge_error:
@@ -1561,7 +1562,8 @@ def get_task_params(task_id: str) -> str | None:
             context_id=task_id,
             timeout=30,
             max_retries=3,
-            method="POST"
+            method="POST",
+            retry_on_404_patterns=["not found", "Task not found"],  # Handle race conditions
         )
 
         if edge_error:
@@ -1625,36 +1627,24 @@ def get_task_dependency(task_id: str, max_retries: int = 3, retry_delay: float =
 
     payload = {"task_id": task_id}
 
-    for attempt in range(max_retries):
-        try:
-            resp, edge_error = _call_edge_function_with_retry(
-                edge_url=edge_url,
-                payload=payload,
-                headers=headers,
-                function_name="get-task-output",
-                context_id=task_id,
-                timeout=30,
-                max_retries=1,  # Single attempt per retry loop iteration
-                method="POST"
-            )
+    # Use consistent retry pattern with retry_on_404_patterns for race conditions
+    resp, edge_error = _call_edge_function_with_retry(
+        edge_url=edge_url,
+        payload=payload,
+        headers=headers,
+        function_name="get-task-output",
+        context_id=task_id,
+        timeout=30,
+        max_retries=max_retries,
+        method="POST",
+        retry_on_404_patterns=["not found", "Task not found"],  # Handle race conditions
+    )
 
-            if resp and resp.status_code == 200:
-                data = resp.json()
-                return data.get("dependant_on")
-            elif resp and resp.status_code == 404:
-                # Task not found - might be race condition
-                if attempt < max_retries - 1:
-                    dprint(f"[RETRY] Task {task_id} not visible yet (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay)
-                    continue
-            return None
-
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                continue
-            dprint(f"Error fetching dependency for {task_id}: {e}")
-            return None
+    if resp and resp.status_code == 200:
+        data = resp.json()
+        return data.get("dependant_on")
+    elif edge_error:
+        dprint(f"Error fetching dependency for {task_id}: {edge_error}")
 
     return None
 
@@ -1726,7 +1716,8 @@ def get_orchestrator_child_tasks(orchestrator_task_id: str) -> dict:
                 context_id=orchestrator_task_id,
                 timeout=30,
                 max_retries=3,
-                method="POST"
+                method="POST",
+                retry_on_404_patterns=["not found"],  # Handle race conditions
             )
 
             if resp and resp.status_code == 200:
