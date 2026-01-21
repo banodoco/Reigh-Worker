@@ -1404,7 +1404,10 @@ def poll_task_status(task_id: str, poll_interval_seconds: int = 10, timeout_seco
 # Helper to query DB for a specific task's output (needed by segment handler)
 def get_task_output_location_from_db(task_id_to_find: str) -> str | None:
     """
-    Queries Supabase for a specific task's output location.
+    Fetches a task's output location via the get-task-output Edge Function.
+
+    This uses an edge function instead of direct DB query to work with
+    workers that only have anon key access (RLS would block direct queries).
 
     Args:
         task_id_to_find: Task ID to look up
@@ -1412,51 +1415,125 @@ def get_task_output_location_from_db(task_id_to_find: str) -> str | None:
     Returns:
         Output location string if task is complete, None otherwise
     """
-    dprint(f"Querying DB for output location of task: {task_id_to_find}")
-    if not SUPABASE_CLIENT:
-        print(f"[ERROR] Supabase client not initialized. Cannot query task output {task_id_to_find}")
+    dprint(f"Fetching output location for task: {task_id_to_find}")
+
+    # Build edge function URL
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_GET_TASK_OUTPUT_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/get-task-output" if SUPABASE_URL else None)
+    )
+
+    if not edge_url:
+        print(f"[ERROR] No edge function URL available for get-task-output")
         return None
 
-    try:
-        response = SUPABASE_CLIENT.table(PG_TABLE_NAME)\
-            .select("output_location, status")\
-            .eq("id", task_id_to_find)\
-            .single()\
-            .execute()
+    if not SUPABASE_ACCESS_TOKEN:
+        print(f"[ERROR] No access token available for get-task-output")
+        return None
 
-        if response.data:
-            task_details = response.data
-            if task_details.get("status") == STATUS_COMPLETE and task_details.get("output_location"):
-                return task_details.get("output_location")
-            else:
-                dprint(f"Task {task_id_to_find} found but not complete or no output_location. Status: {task_details.get('status')}")
-                return None
-        else:
-            dprint(f"Task {task_id_to_find} not found in Supabase.")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"
+    }
+
+    payload = {"task_id": task_id_to_find}
+
+    try:
+        resp, edge_error = _call_edge_function_with_retry(
+            edge_url=edge_url,
+            payload=payload,
+            headers=headers,
+            function_name="get-task-output",
+            context_id=task_id_to_find,
+            timeout=30,
+            max_retries=3,
+            method="POST"
+        )
+
+        if edge_error:
+            print(f"[ERROR] get-task-output failed for {task_id_to_find}: {edge_error}")
             return None
+
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            status = data.get("status")
+            output_location = data.get("output_location")
+
+            if status == STATUS_COMPLETE and output_location:
+                dprint(f"Task {task_id_to_find} output fetched successfully")
+                return output_location
+            else:
+                dprint(f"Task {task_id_to_find} not complete or no output. Status: {status}")
+                return None
+        elif resp and resp.status_code == 404:
+            dprint(f"Task {task_id_to_find} not found")
+            return None
+        else:
+            status_code = resp.status_code if resp else "no response"
+            print(f"[ERROR] get-task-output unexpected response for {task_id_to_find}: {status_code}")
+            return None
+
     except Exception as e:
-        print(f"Error querying Supabase for task output {task_id_to_find}: {e}")
+        print(f"[ERROR] get-task-output exception for {task_id_to_find}: {e}")
         traceback.print_exc()
         return None
 
 def get_task_params(task_id: str) -> str | None:
-    """Gets the raw params JSON string for a given task ID from Supabase."""
-    if not SUPABASE_CLIENT:
-        print(f"[ERROR] Supabase client not initialized. Cannot get task params for {task_id}")
+    """Gets the raw params JSON string for a given task ID via edge function."""
+    dprint(f"Fetching params for task: {task_id}")
+
+    # Build edge function URL
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_GET_TASK_OUTPUT_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/get-task-output" if SUPABASE_URL else None)
+    )
+
+    if not edge_url or not SUPABASE_ACCESS_TOKEN:
+        # Fallback to direct query if edge function not available
+        if SUPABASE_CLIENT:
+            try:
+                resp = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("params").eq("id", task_id).single().execute()
+                if resp.data:
+                    return resp.data.get("params")
+            except Exception as e:
+                dprint(f"Error getting task params for {task_id}: {e}")
         return None
 
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"
+    }
+
+    payload = {"task_id": task_id}
+
     try:
-        resp = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("params").eq("id", task_id).single().execute()
-        if resp.data:
-            return resp.data.get("params")
+        resp, edge_error = _call_edge_function_with_retry(
+            edge_url=edge_url,
+            payload=payload,
+            headers=headers,
+            function_name="get-task-output",
+            context_id=task_id,
+            timeout=30,
+            max_retries=3,
+            method="POST"
+        )
+
+        if edge_error:
+            dprint(f"get-task-output (params) failed for {task_id}: {edge_error}")
+            return None
+
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            return data.get("params")
         return None
+
     except Exception as e:
-        dprint(f"Error getting task params for {task_id} from Supabase: {e}")
+        dprint(f"Error getting task params for {task_id}: {e}")
         return None
 
 def get_task_dependency(task_id: str, max_retries: int = 3, retry_delay: float = 0.5) -> str | None:
     """
-    Gets the dependency task ID for a given task ID from Supabase.
+    Gets the dependency task ID for a given task ID via edge function.
 
     Includes retry logic to handle race conditions where a newly created task
     may not be immediately visible in the database.
@@ -1469,77 +1546,114 @@ def get_task_dependency(task_id: str, max_retries: int = 3, retry_delay: float =
     Returns:
         Dependency task ID or None if no dependency
     """
-    if not SUPABASE_CLIENT:
-        print(f"[ERROR] Supabase client not initialized. Cannot get task dependency for {task_id}")
+    import time
+    dprint(f"Fetching dependency for task: {task_id}")
+
+    # Build edge function URL
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_GET_TASK_OUTPUT_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/get-task-output" if SUPABASE_URL else None)
+    )
+
+    if not edge_url or not SUPABASE_ACCESS_TOKEN:
+        # Fallback to direct query if edge function not available
+        if SUPABASE_CLIENT:
+            for attempt in range(max_retries):
+                try:
+                    response = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("dependant_on").eq("id", task_id).single().execute()
+                    if response.data:
+                        return response.data.get("dependant_on")
+                    return None
+                except Exception as e:
+                    if "0 rows" in str(e) and attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    dprint(f"Error fetching dependant_on for task {task_id}: {e}")
+                    return None
         return None
 
-    import time
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"
+    }
+
+    payload = {"task_id": task_id}
 
     for attempt in range(max_retries):
         try:
-            response = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("dependant_on").eq("id", task_id).single().execute()
-            if response.data:
-                return response.data.get("dependant_on")
-            return None
-        except Exception as e_supabase_dep:
-            error_str = str(e_supabase_dep)
+            resp, edge_error = _call_edge_function_with_retry(
+                edge_url=edge_url,
+                payload=payload,
+                headers=headers,
+                function_name="get-task-output",
+                context_id=task_id,
+                timeout=30,
+                max_retries=1,  # Single attempt per retry loop iteration
+                method="POST"
+            )
 
-            # Check if it's a "0 rows" error (race condition)
-            if "0 rows" in error_str and attempt < max_retries - 1:
-                dprint(f"[RETRY] Task {task_id} not visible yet (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                return data.get("dependant_on")
+            elif resp and resp.status_code == 404:
+                # Task not found - might be race condition
+                if attempt < max_retries - 1:
+                    dprint(f"[RETRY] Task {task_id} not visible yet (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue
+            return None
+
+        except Exception as e:
+            if attempt < max_retries - 1:
                 time.sleep(retry_delay)
                 continue
-
-            # Final attempt failed or different error
-            dprint(f"Error fetching dependant_on from Supabase for task {task_id}: {e_supabase_dep}")
+            dprint(f"Error fetching dependency for {task_id}: {e}")
             return None
 
     return None
 
 def get_orchestrator_child_tasks(orchestrator_task_id: str) -> dict:
     """
-    Gets all child tasks for a given orchestrator task ID from Supabase.
+    Gets all child tasks for a given orchestrator task ID via edge function.
     Returns dict with task type lists: 'segments', 'stitch', 'join_clips_segment',
     'join_clips_orchestrator', 'join_final_stitch'.
     """
-    if not SUPABASE_CLIENT:
-        print(f"[ERROR] Supabase client not initialized. Cannot get orchestrator child tasks for {orchestrator_task_id}")
-        return {'segments': [], 'stitch': [], 'join_clips_segment': [], 'join_clips_orchestrator': [], 'join_final_stitch': []}
+    empty_result = {'segments': [], 'stitch': [], 'join_clips_segment': [], 'join_clips_orchestrator': [], 'join_final_stitch': []}
+    dprint(f"Fetching child tasks for orchestrator: {orchestrator_task_id}")
 
-    try:
-        # Query for child tasks referencing this orchestrator
-        response = SUPABASE_CLIENT.table(PG_TABLE_NAME)\
-            .select("id, task_type, status, params, output_location")\
-            .contains("params", {"orchestrator_task_id_ref": orchestrator_task_id})\
-            .order("created_at", desc=False)\
-            .execute()
+    # Build edge function URL
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_GET_ORCHESTRATOR_CHILDREN_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/get-orchestrator-children" if SUPABASE_URL else None)
+    )
 
+    def _categorize_tasks(tasks_data: list) -> dict:
+        """Categorize tasks by type."""
         segments = []
         stitch = []
         join_clips_segment = []
         join_clips_orchestrator = []
         join_final_stitch = []
 
-        if response.data:
-            for task in response.data:
-                task_data = {
-                    'id': task['id'],
-                    'task_type': task['task_type'],
-                    'status': task['status'],
-                    'params': task.get('params', {}),
-                    'task_params': task.get('params', {}),  # Alias for compatibility
-                    'output_location': task.get('output_location', '')
-                }
-                if task['task_type'] == 'travel_segment':
-                    segments.append(task_data)
-                elif task['task_type'] == 'travel_stitch':
-                    stitch.append(task_data)
-                elif task['task_type'] == 'join_clips_segment':
-                    join_clips_segment.append(task_data)
-                elif task['task_type'] == 'join_clips_orchestrator':
-                    join_clips_orchestrator.append(task_data)
-                elif task['task_type'] == 'join_final_stitch':
-                    join_final_stitch.append(task_data)
+        for task in tasks_data:
+            task_data = {
+                'id': task['id'],
+                'task_type': task['task_type'],
+                'status': task['status'],
+                'params': task.get('params', {}),
+                'task_params': task.get('params', {}),
+                'output_location': task.get('output_location', '')
+            }
+            if task['task_type'] == 'travel_segment':
+                segments.append(task_data)
+            elif task['task_type'] == 'travel_stitch':
+                stitch.append(task_data)
+            elif task['task_type'] == 'join_clips_segment':
+                join_clips_segment.append(task_data)
+            elif task['task_type'] == 'join_clips_orchestrator':
+                join_clips_orchestrator.append(task_data)
+            elif task['task_type'] == 'join_final_stitch':
+                join_final_stitch.append(task_data)
 
         return {
             'segments': segments,
@@ -1549,10 +1663,55 @@ def get_orchestrator_child_tasks(orchestrator_task_id: str) -> dict:
             'join_final_stitch': join_final_stitch,
         }
 
+    # Try edge function first
+    if edge_url and SUPABASE_ACCESS_TOKEN:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"
+        }
+        payload = {"orchestrator_task_id": orchestrator_task_id}
+
+        try:
+            resp, edge_error = _call_edge_function_with_retry(
+                edge_url=edge_url,
+                payload=payload,
+                headers=headers,
+                function_name="get-orchestrator-children",
+                context_id=orchestrator_task_id,
+                timeout=30,
+                max_retries=3,
+                method="POST"
+            )
+
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                tasks = data.get("tasks", [])
+                return _categorize_tasks(tasks)
+            elif edge_error:
+                dprint(f"get-orchestrator-children failed: {edge_error}")
+        except Exception as e:
+            dprint(f"Error calling get-orchestrator-children: {e}")
+
+    # Fallback to direct query if edge function not available or failed
+    if not SUPABASE_CLIENT:
+        print(f"[ERROR] No edge function or Supabase client available for get_orchestrator_child_tasks")
+        return empty_result
+
+    try:
+        response = SUPABASE_CLIENT.table(PG_TABLE_NAME)\
+            .select("id, task_type, status, params, output_location")\
+            .contains("params", {"orchestrator_task_id_ref": orchestrator_task_id})\
+            .order("created_at", desc=False)\
+            .execute()
+
+        if response.data:
+            return _categorize_tasks(response.data)
+        return empty_result
+
     except Exception as e:
         dprint(f"Error querying Supabase for orchestrator child tasks {orchestrator_task_id}: {e}")
         traceback.print_exc()
-        return {'segments': [], 'stitch': [], 'join_clips_segment': []}
+        return empty_result
 
 def cleanup_duplicate_child_tasks(orchestrator_task_id: str, expected_segments: int) -> dict:
     """
