@@ -153,7 +153,13 @@ def _handle_join_clips_task(
         # Extract keep_bridging_images param
         keep_bridging_images = task_params_from_db.get("keep_bridging_images", False)
 
+        # transition_only mode: generate transition video without stitching
+        # Used by parallel join architecture where final stitch happens in a separate task
+        transition_only = task_params_from_db.get("transition_only", False)
+
         dprint(f"{DEBUG_TAG} [JOIN_CLIPS] Task {task_id}: Mode: {'REPLACE' if replace_mode else 'INSERT'}")
+        if transition_only:
+            dprint(f"{DEBUG_TAG} [JOIN_CLIPS] Task {task_id}: transition_only=True - will output transition video only (no stitching)")
         if replace_mode:
             dprint(f"{DEBUG_TAG} [JOIN_CLIPS] Task {task_id}: gap_frame_count={gap_frame_count} frames will REPLACE boundary frames (no insertion)")
 
@@ -552,7 +558,7 @@ def _handle_join_clips_task(
 
             # Initialize vid2vid source video path (will be set in REPLACE mode if enabled)
             vid2vid_source_video_path = None
-            
+
             if replace_mode:
                 # REPLACE mode: Context comes from OUTSIDE the gap region
                 # Gap is removed from boundary, context is adjacent to (but outside) the gap
@@ -560,25 +566,81 @@ def _handle_join_clips_task(
                 # clip1: [...][context 8][gap N removed]
                 # clip2: [gap M removed][context 8][...]
                 #
-                # Calculate available context for each clip (keeping gap position fixed)
                 clip1_available = len(start_all_frames)
                 clip2_available = len(end_all_frames)
-                clip1_max_context = clip1_available - gap_from_clip1  # Max context after reserving gap
-                clip2_max_context = clip2_available - gap_from_clip2  # Max context after reserving gap
-                
-                # Validate clips have enough frames for the gap (minimum requirement)
+                min_clip_frames = min(clip1_available, clip2_available)
+
+                # Calculate total frames needed: gap + context on each side
+                total_needed = gap_frame_count + 2 * context_frame_count
+
+                # --- PROPORTIONAL REDUCTION if clips are too short ---
+                if min_clip_frames < total_needed:
+                    dprint(f"[JOIN_CLIPS] Task {task_id}: Clips too short, applying proportional reduction")
+                    dprint(f"[JOIN_CLIPS]   Original: gap={gap_frame_count}, context={context_frame_count}, total_needed={total_needed}")
+                    dprint(f"[JOIN_CLIPS]   Available: clip1={clip1_available}, clip2={clip2_available}, min={min_clip_frames}")
+
+                    # Calculate reduction ratio
+                    # Leave at least 5 frames for minimum VACE generation (context + gap + context >= 5)
+                    usable_frames = max(5, min_clip_frames - 2)  # Reserve 2 frames for safety margin
+                    ratio = usable_frames / total_needed
+
+                    # Apply proportional reduction to both gap and context
+                    adjusted_gap = max(1, int(gap_frame_count * ratio))
+                    adjusted_context = max(1, int(context_frame_count * ratio))
+
+                    # Ensure we have at least 5 total frames for VACE (minimum 4n+1 = 5)
+                    adjusted_total = adjusted_gap + 2 * adjusted_context
+                    if adjusted_total < 5:
+                        # Force minimum viable settings
+                        adjusted_gap = 1
+                        adjusted_context = 2
+                        adjusted_total = 5
+                        dprint(f"[JOIN_CLIPS] Task {task_id}: Forced minimum VACE settings (gap=1, context=2)")
+
+                    dprint(f"[JOIN_CLIPS]   Adjusted: gap={adjusted_gap}, context={adjusted_context}, total={adjusted_total}")
+                    dprint(f"[JOIN_CLIPS]   Reduction ratio: {ratio:.2%}")
+
+                    # Update the working values
+                    gap_frame_count = adjusted_gap
+                    context_frame_count = adjusted_context
+
+                    # Recalculate gap splits with new gap value
+                    gap_from_clip1 = gap_frame_count // 2
+                    gap_from_clip2 = gap_frame_count - gap_from_clip1
+                    dprint(f"[JOIN_CLIPS]   New gap splits: gap_from_clip1={gap_from_clip1}, gap_from_clip2={gap_from_clip2}")
+
+                    # Recalculate VACE quantization with new values
+                    quantization_result = _calculate_vace_quantization(
+                        context_frame_count=context_frame_count,
+                        gap_frame_count=gap_frame_count,
+                        replace_mode=replace_mode
+                    )
+                    gap_for_guide = quantization_result['gap_for_guide']
+                    quantization_shift = quantization_result['quantization_shift']
+                    dprint(f"[JOIN_CLIPS]   Recalculated quantization: gap_for_guide={gap_for_guide}, shift={quantization_shift}")
+
+                    # Summary
+                    dprint(f"[JOIN_CLIPS] Task {task_id}: ✓ PROPORTIONAL REDUCTION COMPLETE")
+                    dprint(f"[JOIN_CLIPS]   FINAL: gap={gap_frame_count}, context={context_frame_count}, gap_splits=({gap_from_clip1},{gap_from_clip2})")
+                else:
+                    dprint(f"[JOIN_CLIPS] Task {task_id}: Clips have sufficient frames ({min_clip_frames} >= {total_needed}), no reduction needed")
+
+                # Now calculate available context with (potentially adjusted) gap values
+                clip1_max_context = clip1_available - gap_from_clip1
+                clip2_max_context = clip2_available - gap_from_clip2
+
+                # Validate clips have enough frames (should pass after proportional reduction)
                 if clip1_max_context < 1:
-                    error_msg = f"Starting video too short for REPLACE mode: need at least {gap_from_clip1 + 1} frames, have {clip1_available}"
+                    error_msg = f"Starting video too short: need at least {gap_from_clip1 + 1} frames, have {clip1_available}"
                     dprint(f"[JOIN_CLIPS_ERROR] Task {task_id}: {error_msg}")
                     return False, error_msg
-                
+
                 if clip2_max_context < 1:
-                    error_msg = f"Ending video too short for REPLACE mode: need at least {gap_from_clip2 + 1} frames, have {clip2_available}"
+                    error_msg = f"Ending video too short: need at least {gap_from_clip2 + 1} frames, have {clip2_available}"
                     dprint(f"[JOIN_CLIPS_ERROR] Task {task_id}: {error_msg}")
                     return False, error_msg
-                
-                # Adjust context frame counts per-side if clips are too short
-                # Keep gap position fixed, reduce context on the side that's too short
+
+                # Final context adjustment (may further reduce if clips are asymmetric)
                 context_from_clip1 = min(context_frame_count, clip1_max_context)
                 context_from_clip2 = min(context_frame_count, clip2_max_context)
                 
@@ -933,7 +995,53 @@ def _handle_join_clips_task(
                     else:
                         max_safe_blend = context_frame_count
 
-                    # --- 8. Concatenate Full Clips with Transition ---
+                    # --- 8. Handle transition_only mode (early return) ---
+                    if transition_only:
+                        dprint(f"[JOIN_CLIPS] Task {task_id}: transition_only mode - uploading transition video directly")
+
+                        # Upload transition video and return
+                        transition_output_path, initial_db_location = prepare_output_path_with_upload(
+                            task_id=task_id,
+                            filename=f"{task_id}_transition.mp4",
+                            main_output_dir_base=main_output_dir_base,
+                            task_type="join_clips_segment",
+                            dprint=dprint
+                        )
+
+                        # Copy transition to output path
+                        import shutil
+                        shutil.copy2(transition_video_path, transition_output_path)
+
+                        # Upload and get final location
+                        final_db_location = upload_and_get_final_output_location(
+                            local_output_path=transition_output_path,
+                            task_id=task_id,
+                            initial_db_location=initial_db_location,
+                            dprint=dprint
+                        )
+
+                        dprint(f"[JOIN_CLIPS] Task {task_id}: transition_only complete - {final_db_location}")
+
+                        # Return transition metadata for the final stitch task
+                        # Include trim info so the stitch task knows how to handle clips
+                        # Use ACTUAL context values (may be reduced from requested if clips were short)
+                        actual_ctx_clip1 = context_from_clip1 if replace_mode else context_frame_count
+                        actual_ctx_clip2 = context_from_clip2 if replace_mode else context_frame_count
+                        actual_blend = min(actual_ctx_clip1, actual_ctx_clip2, max_safe_blend)
+
+                        return True, json.dumps({
+                            "transition_url": final_db_location,
+                            "transition_index": task_params_from_db.get("transition_index", 0),
+                            "frames": actual_transition_frames,
+                            "gap_from_clip1": gap_from_clip1,
+                            "gap_from_clip2": gap_from_clip2,
+                            "blend_frames": actual_blend,
+                            "context_from_clip1": actual_ctx_clip1,
+                            "context_from_clip2": actual_ctx_clip2,
+                            "context_frame_count": context_frame_count  # Original requested (for reference)
+                        })
+
+                    # --- 9. Concatenate Full Clips with Transition ---
                     dprint(f"[JOIN_CLIPS] Task {task_id}: Concatenating full clips with transition...")
 
                     try:
@@ -1217,6 +1325,303 @@ def _handle_join_clips_task(
     except Exception as e:
         error_msg = f"Unexpected error in join_clips handler: {e}"
         dprint(f"[JOIN_CLIPS_ERROR] Task {task_id}: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return False, error_msg
+
+
+def _handle_join_final_stitch(
+    task_params_from_db: dict,
+    main_output_dir_base: Path,
+    task_id: str,
+    *, dprint
+) -> Tuple[bool, str]:
+    """
+    Handle join_final_stitch task: stitch all clips and transitions together in one pass.
+
+    This is the second phase of the parallel join architecture:
+    1. Multiple join_clips_segment tasks generate transitions in parallel (transition_only=True)
+    2. This task stitches all original clips + transitions together in a single encode pass
+
+    Args:
+        task_params_from_db: Task parameters including:
+            - clip_list: List of original clip dicts with 'url' and optional 'name'
+            - transition_task_ids: List of transition task IDs to fetch outputs from
+            - gap_from_clip1: Frames to trim from end of each clip (except last)
+            - gap_from_clip2: Frames to trim from start of each clip (except first)
+            - blend_frames: Frames to crossfade at each boundary
+            - fps: Output FPS
+            - audio_url: Optional audio to add to final output
+        main_output_dir_base: Base output directory
+        task_id: Task ID for logging
+        dprint: Print function for logging
+
+    Returns:
+        Tuple of (success: bool, output_path_or_message: str)
+    """
+    dprint(f"[FINAL_STITCH] Task {task_id}: Starting final stitch handler")
+
+    try:
+        # --- 1. Extract Parameters ---
+        clip_list = task_params_from_db.get("clip_list", [])
+        transition_task_ids = task_params_from_db.get("transition_task_ids", [])
+        gap_from_clip1 = task_params_from_db.get("gap_from_clip1", 11)
+        gap_from_clip2 = task_params_from_db.get("gap_from_clip2", 12)
+        blend_frames = task_params_from_db.get("blend_frames", 15)
+        target_fps = task_params_from_db.get("fps", 16)
+        audio_url = task_params_from_db.get("audio_url")
+
+        num_clips = len(clip_list)
+        num_transitions = len(transition_task_ids)
+        expected_transitions = num_clips - 1
+
+        dprint(f"[FINAL_STITCH] Task {task_id}: {num_clips} clips, {num_transitions} transitions")
+        dprint(f"[FINAL_STITCH] Task {task_id}: gap_from_clip1={gap_from_clip1}, gap_from_clip2={gap_from_clip2}, blend_frames={blend_frames}")
+
+        if num_clips < 2:
+            return False, "clip_list must contain at least 2 clips"
+
+        if num_transitions != expected_transitions:
+            return False, f"Expected {expected_transitions} transitions for {num_clips} clips, got {num_transitions}"
+
+        # --- 2. Create Working Directory ---
+        stitch_dir = main_output_dir_base / f"final_stitch_{task_id[:8]}"
+        stitch_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- 3. Fetch Transition Outputs ---
+        dprint(f"[FINAL_STITCH] Task {task_id}: Fetching transition outputs...")
+        transitions = []
+
+        for i, trans_task_id in enumerate(transition_task_ids):
+            # Get the output from the completed transition task
+            trans_output = db_ops.get_task_output_location_from_db(trans_task_id)
+            if not trans_output:
+                return False, f"Failed to get output for transition task {trans_task_id}"
+
+            # Parse the JSON output from transition_only mode
+            try:
+                trans_data = json.loads(trans_output)
+                trans_url = trans_data.get("transition_url")
+                if not trans_url:
+                    return False, f"Transition task {trans_task_id} output missing transition_url"
+
+                # Extract per-transition blend values
+                # context_from_clip1 = frames from clip before transition
+                # context_from_clip2 = frames from clip after transition
+                ctx_clip1 = trans_data.get("context_from_clip1", blend_frames)
+                ctx_clip2 = trans_data.get("context_from_clip2", blend_frames)
+                trans_blend = trans_data.get("blend_frames", min(ctx_clip1, ctx_clip2))
+
+                transitions.append({
+                    "url": trans_url,
+                    "index": trans_data.get("transition_index", i),
+                    "frames": trans_data.get("frames"),
+                    "blend_frames": trans_blend,
+                    "context_from_clip1": ctx_clip1,  # For clip→transition crossfade
+                    "context_from_clip2": ctx_clip2,  # For transition→clip crossfade
+                    "gap_from_clip1": trans_data.get("gap_from_clip1", gap_from_clip1),
+                    "gap_from_clip2": trans_data.get("gap_from_clip2", gap_from_clip2),
+                })
+                dprint(f"[FINAL_STITCH] Task {task_id}: Transition {i}: blend={trans_blend}, ctx1={ctx_clip1}, ctx2={ctx_clip2}")
+            except json.JSONDecodeError:
+                # Fallback: treat as direct URL (legacy mode)
+                transitions.append({
+                    "url": trans_output,
+                    "index": i,
+                    "blend_frames": blend_frames,
+                    "context_from_clip1": blend_frames,
+                    "context_from_clip2": blend_frames,
+                })
+                dprint(f"[FINAL_STITCH] Task {task_id}: Transition {i} (raw URL, using defaults): {trans_output}")
+
+        # Sort transitions by index
+        transitions.sort(key=lambda t: t["index"])
+
+        # Validate gap values are consistent across transitions (current architecture assumes this)
+        if len(transitions) > 1:
+            first_gap1 = transitions[0].get("gap_from_clip1", gap_from_clip1)
+            first_gap2 = transitions[0].get("gap_from_clip2", gap_from_clip2)
+            for t in transitions[1:]:
+                t_gap1 = t.get("gap_from_clip1", gap_from_clip1)
+                t_gap2 = t.get("gap_from_clip2", gap_from_clip2)
+                if t_gap1 != first_gap1 or t_gap2 != first_gap2:
+                    dprint(f"[FINAL_STITCH] Task {task_id}: WARNING - Inconsistent gap values across transitions!")
+                    dprint(f"[FINAL_STITCH]   Transition 0: gap1={first_gap1}, gap2={first_gap2}")
+                    dprint(f"[FINAL_STITCH]   Transition {t['index']}: gap1={t_gap1}, gap2={t_gap2}")
+                    # Use the values from task params as canonical
+                    dprint(f"[FINAL_STITCH]   Using task params: gap1={gap_from_clip1}, gap2={gap_from_clip2}")
+
+        # --- 4. Download All Videos ---
+        dprint(f"[FINAL_STITCH] Task {task_id}: Downloading clips and transitions...")
+
+        clip_paths = []
+        for i, clip in enumerate(clip_list):
+            clip_url = clip.get("url")
+            if not clip_url:
+                return False, f"Clip {i} missing 'url'"
+
+            local_path = download_video_if_url(
+                clip_url,
+                download_target_dir=stitch_dir,
+                task_id_for_logging=task_id,
+                descriptive_name=f"clip_{i}"
+            )
+            if not local_path:
+                return False, f"Failed to download clip {i}: {clip_url}"
+            clip_paths.append(Path(local_path))
+            dprint(f"[FINAL_STITCH] Task {task_id}: Downloaded clip {i}: {local_path}")
+
+        transition_paths = []
+        for i, trans in enumerate(transitions):
+            trans_url = trans.get("url")
+            local_path = download_video_if_url(
+                trans_url,
+                download_target_dir=stitch_dir,
+                task_id_for_logging=task_id,
+                descriptive_name=f"transition_{i}"
+            )
+            if not local_path:
+                return False, f"Failed to download transition {i}: {trans_url}"
+            transition_paths.append(Path(local_path))
+            dprint(f"[FINAL_STITCH] Task {task_id}: Downloaded transition {i}: {local_path}")
+
+        # --- 5. Trim Clips and Build Stitch List ---
+        dprint(f"[FINAL_STITCH] Task {task_id}: Preparing clips for stitching...")
+
+        import tempfile
+        stitch_videos = []
+        stitch_blends = []
+
+        for i, clip_path in enumerate(clip_paths):
+            clip_frames, clip_fps = get_video_frame_count_and_fps(str(clip_path))
+            if not clip_frames:
+                return False, f"Could not get frame count for clip {i}"
+
+            # Determine trim amounts
+            trim_start = gap_from_clip2 if i > 0 else 0  # First clip: no start trim
+            trim_end = gap_from_clip1 if i < num_clips - 1 else 0  # Last clip: no end trim
+
+            frames_to_keep = clip_frames - trim_start - trim_end
+            if frames_to_keep <= 0:
+                return False, f"Clip {i} has {clip_frames} frames but needs {trim_start + trim_end} trimmed"
+
+            dprint(f"[FINAL_STITCH] Task {task_id}: Clip {i}: {clip_frames} frames, trim_start={trim_start}, trim_end={trim_end}, keeping={frames_to_keep}")
+
+            # Extract trimmed clip
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False, dir=stitch_dir) as tf:
+                trimmed_path = Path(tf.name)
+
+            start_frame = trim_start
+            end_frame = clip_frames - trim_end - 1 if trim_end > 0 else None
+
+            trimmed = extract_frame_range_to_video(
+                source_video=clip_path,
+                output_path=trimmed_path,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                fps=target_fps,
+                dprint_func=dprint
+            )
+            if not trimmed:
+                return False, f"Failed to trim clip {i}"
+
+            # Add to stitch list
+            stitch_videos.append(trimmed_path)
+
+            # Add transition after this clip (except after last clip)
+            if i < num_clips - 1:
+                # Use per-transition blend values:
+                # - clip[i] → transition[i]: context_from_clip1 (context from clip i in transition)
+                # - transition[i] → clip[i+1]: context_from_clip2 (context from clip i+1 in transition)
+                trans_info = transitions[i]
+                blend_clip_to_trans = trans_info.get("context_from_clip1", blend_frames)
+                blend_trans_to_clip = trans_info.get("context_from_clip2", blend_frames)
+
+                stitch_blends.append(blend_clip_to_trans)  # Blend between clip and transition
+                stitch_videos.append(transition_paths[i])
+                stitch_blends.append(blend_trans_to_clip)  # Blend between transition and next clip
+
+                dprint(f"[FINAL_STITCH] Task {task_id}: Crossfades for transition {i}: clip→trans={blend_clip_to_trans}, trans→clip={blend_trans_to_clip}")
+
+        # --- 6. Stitch Everything Together ---
+        dprint(f"[FINAL_STITCH] Task {task_id}: Stitching {len(stitch_videos)} videos with {len(stitch_blends)} blend points...")
+
+        final_output_path, initial_db_location = prepare_output_path_with_upload(
+            task_id=task_id,
+            filename=f"{task_id}_joined.mp4",
+            main_output_dir_base=main_output_dir_base,
+            task_type="join_final_stitch",
+            dprint=dprint
+        )
+
+        try:
+            created_video = sm_stitch_videos_with_crossfade(
+                video_paths=stitch_videos,
+                blend_frame_counts=stitch_blends,
+                output_path=final_output_path,
+                fps=target_fps,
+                crossfade_mode="linear_sharp",
+                crossfade_sharp_amt=0.3,
+                dprint=dprint
+            )
+
+            if created_video is None:
+                raise ValueError("stitch_videos_with_crossfade returned None")
+
+            dprint(f"[FINAL_STITCH] Task {task_id}: Successfully stitched all videos")
+
+        except Exception as e:
+            return False, f"Failed to stitch videos: {e}"
+
+        # --- 7. Add Audio (if provided) ---
+        if audio_url:
+            dprint(f"[FINAL_STITCH] Task {task_id}: Adding audio from {audio_url}")
+            try:
+                audio_local = download_video_if_url(
+                    audio_url,
+                    download_target_dir=stitch_dir,
+                    task_id_for_logging=task_id,
+                    descriptive_name="audio"
+                )
+                if audio_local:
+                    with_audio_path = final_output_path.with_name(f"{task_id}_joined_audio.mp4")
+                    success = add_audio_to_video(
+                        video_path=str(final_output_path),
+                        audio_path=audio_local,
+                        output_path=str(with_audio_path),
+                        dprint=dprint
+                    )
+                    if success and with_audio_path.exists():
+                        final_output_path = with_audio_path
+                        dprint(f"[FINAL_STITCH] Task {task_id}: Audio added successfully")
+            except Exception as audio_err:
+                dprint(f"[FINAL_STITCH] Task {task_id}: Failed to add audio (continuing without): {audio_err}")
+
+        # --- 8. Verify and Upload ---
+        if not final_output_path.exists():
+            return False, "Final output file does not exist"
+
+        file_size = final_output_path.stat().st_size
+        if file_size == 0:
+            return False, "Final output file is empty"
+
+        final_frames, final_fps = get_video_frame_count_and_fps(str(final_output_path))
+        dprint(f"[FINAL_STITCH] Task {task_id}: Final video: {final_frames} frames @ {final_fps} fps, {file_size} bytes")
+
+        # Upload
+        final_db_location = upload_and_get_final_output_location(
+            local_output_path=final_output_path,
+            task_id=task_id,
+            initial_db_location=initial_db_location,
+            dprint=dprint
+        )
+
+        dprint(f"[FINAL_STITCH] Task {task_id}: Complete - {final_db_location}")
+        return True, final_db_location
+
+    except Exception as e:
+        error_msg = f"Unexpected error in final stitch handler: {e}"
+        dprint(f"[FINAL_STITCH_ERROR] Task {task_id}: {error_msg}")
         import traceback
         traceback.print_exc()
         return False, error_msg

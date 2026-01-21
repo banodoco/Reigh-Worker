@@ -1100,14 +1100,15 @@ def _run_db_migrations():
     dprint("DB Migrations: Skipping Supabase migrations (table assumed to exist).")
     return
 
-def add_task_to_db(task_payload: dict, task_type_str: str, dependant_on: str | None = None, db_path: str | None = None) -> str:
+def add_task_to_db(task_payload: dict, task_type_str: str, dependant_on: str | list[str] | None = None, db_path: str | None = None) -> str:
     """
     Adds a new task to the Supabase database via Edge Function.
 
     Args:
         task_payload: Task parameters dictionary
         task_type_str: Type of task being created
-        dependant_on: Optional dependency task ID
+        dependant_on: Optional dependency - single task ID string or list of task IDs.
+                      When list is provided, task will only run when ALL dependencies complete.
         db_path: Ignored (kept for API compatibility)
 
     Returns:
@@ -1136,37 +1137,47 @@ def add_task_to_db(task_payload: dict, task_type_str: str, dependant_on: str | N
     if SUPABASE_ACCESS_TOKEN:
         headers["Authorization"] = f"Bearer {SUPABASE_ACCESS_TOKEN}"
 
-    # Defensive check: if a dependency is specified, ensure it exists before enqueueing
+    # Normalize dependant_on to list format for consistency
+    # Edge Function expects: null, or JSON array of UUIDs
+    dependant_on_list: list[str] | None = None
     if dependant_on:
+        if isinstance(dependant_on, str):
+            dependant_on_list = [dependant_on]
+        else:
+            dependant_on_list = list(dependant_on)
+
+    # Defensive check: if dependencies are specified, ensure they all exist before enqueueing
+    if dependant_on_list:
         max_retries = 3
         retry_delay = 0.5
 
-        for attempt in range(max_retries):
-            try:
-                if SUPABASE_CLIENT:
-                    resp_exist = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("id").eq("id", dependant_on).single().execute()
-                    if not getattr(resp_exist, "data", None):
-                        dprint(f"[ERROR][DEBUG_DEPENDENCY_CHAIN] dependant_on not found: {dependant_on}. Refusing to create task of type {task_type_str} with broken dependency.")
-                        raise RuntimeError(f"dependant_on {dependant_on} not found")
-                    # Successfully verified dependency
-                    break
-            except Exception as e_depchk:
-                error_str = str(e_depchk)
-                # Check if it's a "0 rows" error (race condition) and we have retries left
-                if "0 rows" in error_str and attempt < max_retries - 1:
-                    dprint(f"[RETRY][DEBUG_DEPENDENCY_CHAIN] Dependency {dependant_on} not visible yet (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    # Final attempt failed or different error - log warning but continue
-                    dprint(f"[WARN][DEBUG_DEPENDENCY_CHAIN] Could not verify dependant_on {dependant_on} existence prior to enqueue: {e_depchk}")
+        for dep_id in dependant_on_list:
+            for attempt in range(max_retries):
+                try:
+                    if SUPABASE_CLIENT:
+                        resp_exist = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("id").eq("id", dep_id).single().execute()
+                        if not getattr(resp_exist, "data", None):
+                            dprint(f"[ERROR][DEBUG_DEPENDENCY_CHAIN] dependant_on not found: {dep_id}. Refusing to create task of type {task_type_str} with broken dependency.")
+                            raise RuntimeError(f"dependant_on {dep_id} not found")
+                        # Successfully verified this dependency
+                        break
+                except Exception as e_depchk:
+                    error_str = str(e_depchk)
+                    # Check if it's a "0 rows" error (race condition) and we have retries left
+                    if "0 rows" in error_str and attempt < max_retries - 1:
+                        dprint(f"[RETRY][DEBUG_DEPENDENCY_CHAIN] Dependency {dep_id} not visible yet (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        # Final attempt failed or different error - log warning but continue
+                        dprint(f"[WARN][DEBUG_DEPENDENCY_CHAIN] Could not verify dependant_on {dep_id} existence prior to enqueue: {e_depchk}")
 
     payload_edge = {
         "task_id": actual_db_row_id,
         "params": params_for_db,
         "task_type": task_type_str,
         "project_id": project_id,
-        "dependant_on": dependant_on,
+        "dependant_on": dependant_on_list,  # Always list or None for Edge Function
     }
 
     dprint(f"Supabase Edge call >>> POST {edge_url} payload={str(payload_edge)[:120]}…")

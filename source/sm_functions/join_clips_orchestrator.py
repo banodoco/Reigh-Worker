@@ -428,6 +428,142 @@ def _generate_vlm_prompts_for_joins(
 # SHARED CORE LOGIC - Used by both join_clips_orchestrator and edit_video_orchestrator
 # =============================================================================
 
+def calculate_min_clip_frames(gap_frame_count: int, context_frame_count: int, replace_mode: bool) -> int:
+    """
+    Calculate the minimum number of frames a clip must have to safely join.
+
+    In REPLACE mode, we need:
+        gap_frame_count + 2 × context_frame_count ≤ min_clip_frames
+
+    This ensures that context frames don't overlap with previously blended regions
+    in chained joins, avoiding the "double-blending" artifact.
+
+    Args:
+        gap_frame_count: Number of frames in the generated gap/transition
+        context_frame_count: Number of context frames from each clip boundary
+        replace_mode: Whether REPLACE mode is enabled
+
+    Returns:
+        Minimum required frames for each clip
+    """
+    if replace_mode:
+        # In REPLACE mode, we consume:
+        # - gap_from_clip1 frames from end of clip1 (gap // 2)
+        # - gap_from_clip2 frames from start of clip2 (gap - gap//2)
+        # - context_frame_count frames as additional context from each side
+        # Total consumed from a middle clip (both ends): gap + 2*context
+        return gap_frame_count + 2 * context_frame_count
+    else:
+        # In INSERT mode, we only use context frames (no replacement)
+        return 2 * context_frame_count
+
+
+def validate_clip_frames_for_join(
+    clip_list: List[dict],
+    gap_frame_count: int,
+    context_frame_count: int,
+    replace_mode: bool,
+    temp_dir: Path,
+    orchestrator_task_id: str,
+    dprint
+) -> Tuple[bool, str, List[int]]:
+    """
+    Validate that all clips have enough frames for safe joining.
+
+    Args:
+        clip_list: List of clip dicts with 'url' keys
+        gap_frame_count: Gap frames for transition
+        context_frame_count: Context frames from each boundary
+        replace_mode: Whether REPLACE mode is enabled
+        temp_dir: Directory to download clips for frame counting
+        orchestrator_task_id: Task ID for logging
+        dprint: Debug print function
+
+    Returns:
+        Tuple of (is_valid, error_message, frame_counts_per_clip)
+    """
+    min_frames = calculate_min_clip_frames(gap_frame_count, context_frame_count, replace_mode)
+    dprint(f"[VALIDATE_CLIPS] Minimum required frames per clip: {min_frames}")
+    dprint(f"[VALIDATE_CLIPS]   (gap={gap_frame_count} + 2×context={context_frame_count}, replace_mode={replace_mode})")
+
+    frame_counts = []
+    violations = []
+
+    for idx, clip in enumerate(clip_list):
+        clip_url = clip.get("url")
+        if not clip_url:
+            return False, f"Clip {idx} missing 'url' field", []
+
+        # Download clip to count frames
+        local_path = download_video_if_url(
+            clip_url,
+            download_target_dir=temp_dir,
+            task_id_for_logging=orchestrator_task_id,
+            descriptive_name=f"validate_clip_{idx}"
+        )
+
+        if not local_path or not Path(local_path).exists():
+            return False, f"Failed to download clip {idx} for validation: {clip_url}", []
+
+        # Get frame count
+        frames, fps = get_video_frame_count_and_fps(str(local_path))
+        if not frames:
+            return False, f"Could not determine frame count for clip {idx}", []
+
+        frame_counts.append(frames)
+        dprint(f"[VALIDATE_CLIPS] Clip {idx}: {frames} frames (min required: {min_frames})")
+
+        # First and last clips only need half the minimum (only one boundary)
+        is_first = (idx == 0)
+        is_last = (idx == len(clip_list) - 1)
+
+        if is_first or is_last:
+            # Boundary clips need: context + gap_from_that_side
+            if replace_mode:
+                gap_from_side = gap_frame_count // 2 if is_first else (gap_frame_count - gap_frame_count // 2)
+                required = context_frame_count + gap_from_side
+            else:
+                required = context_frame_count
+        else:
+            # Middle clips need full minimum
+            required = min_frames
+
+        if frames < required:
+            violations.append({
+                "idx": idx,
+                "frames": frames,
+                "required": required,
+                "shortfall": required - frames
+            })
+
+    if violations:
+        # Calculate what proportional reduction will produce
+        min_available = min(frame_counts)
+        total_needed = gap_frame_count + 2 * context_frame_count
+        ratio = min_available / total_needed
+        reduced_gap = max(1, int(gap_frame_count * ratio))
+        reduced_context = max(1, int(context_frame_count * ratio))
+
+        warning_parts = []
+        for v in violations:
+            warning_parts.append(f"Clip {v['idx']}: {v['frames']} frames < {v['required']} required")
+
+        warning_msg = (
+            f"[PROPORTIONAL_REDUCTION] Some clips are shorter than ideal:\n  "
+            + "\n  ".join(warning_parts)
+            + f"\n  Original settings: gap={gap_frame_count}, context={context_frame_count}"
+            + f"\n  Will reduce to approximately: gap≈{reduced_gap}, context≈{reduced_context} ({ratio:.0%} of original)"
+            + f"\n  Transitions will be shorter but still generated successfully."
+        )
+        dprint(f"[VALIDATE_CLIPS] {warning_msg}")
+
+        # Return True (valid) with warning - proportional reduction will handle it
+        return True, warning_msg, frame_counts
+
+    dprint(f"[VALIDATE_CLIPS] All {len(clip_list)} clips have sufficient frames")
+    return True, "", frame_counts
+
+
 def _extract_join_settings_from_payload(orchestrator_payload: dict) -> dict:
     """
     Extract standardized join settings from an orchestrator payload.
@@ -474,83 +610,113 @@ def _check_existing_join_tasks(
 ) -> Tuple[Optional[bool], Optional[str]]:
     """
     Check for existing child tasks (idempotency check).
-    
+
+    Handles both patterns:
+    - Chain pattern: num_joins join_clips_segment tasks
+    - Parallel pattern: num_joins join_clips_segment (transitions) + 1 join_final_stitch
+
     Returns:
         (None, None) if no existing tasks or should proceed with creation
         (success: bool, message: str) if should return early (complete/failed/in-progress)
     """
     import json
-    
+
     dprint(f"[JOIN_CORE] Checking for existing child tasks")
     existing_child_tasks = db_ops.get_orchestrator_child_tasks(orchestrator_task_id_str)
     existing_joins = existing_child_tasks.get('join_clips_segment', [])
+    existing_final_stitch = existing_child_tasks.get('join_final_stitch', [])
 
-    if not existing_joins:
-        return None, None
-    
-    dprint(f"[JOIN_CORE] Found {len(existing_joins)} existing join tasks")
+    # Determine which pattern was used
+    is_parallel_pattern = len(existing_final_stitch) > 0
 
-    # Check if we have the expected number
-    if len(existing_joins) < num_joins:
+    if not existing_joins and not existing_final_stitch:
         return None, None
 
-    dprint(f"[JOIN_CORE] All {num_joins} join tasks already exist")
+    dprint(f"[JOIN_CORE] Found {len(existing_joins)} join tasks, {len(existing_final_stitch)} final stitch tasks")
 
-    # Check completion status
+    # Check completion status helper
     def is_complete(task):
-        # DB stores statuses as "Complete" (capitalized). Compare case-insensitively.
         return (task.get('status', '') or '').lower() == 'complete'
 
     def is_terminal_failure(task):
         status = task.get('status', '').lower()
         return status in ('failed', 'cancelled', 'canceled', 'error')
 
-    all_joins_complete = all(is_complete(join) for join in existing_joins)
-    any_join_failed = any(is_terminal_failure(join) for join in existing_joins)
+    if is_parallel_pattern:
+        # === PARALLEL PATTERN ===
+        # Need all transitions complete + final stitch complete
+        if len(existing_joins) < num_joins:
+            return None, None
 
-    # If any failed, mark orchestrator as failed
-    if any_join_failed:
-        failed_joins = [j for j in existing_joins if is_terminal_failure(j)]
-        error_msg = f"{len(failed_joins)} join task(s) failed/cancelled"
-        dprint(f"[JOIN_CORE] FAILED: {error_msg}")
-        return False, f"[ORCHESTRATOR_FAILED] {error_msg}"
+        all_tasks = existing_joins + existing_final_stitch
+        any_failed = any(is_terminal_failure(t) for t in all_tasks)
 
-    # If all complete, return final output
-    if all_joins_complete:
-        # Sort by join_index to get the last one
-        def get_join_index(task):
-            params = task.get('task_params', {})
-            if isinstance(params, str):
+        if any_failed:
+            failed_tasks = [t for t in all_tasks if is_terminal_failure(t)]
+            error_msg = f"{len(failed_tasks)} task(s) failed/cancelled"
+            dprint(f"[JOIN_CORE] FAILED: {error_msg}")
+            return False, f"[ORCHESTRATOR_FAILED] {error_msg}"
+
+        # Check if final stitch is complete
+        if existing_final_stitch and is_complete(existing_final_stitch[0]):
+            final_stitch = existing_final_stitch[0]
+            final_output = final_stitch.get('output_location', 'Completed via idempotency')
+            dprint(f"[JOIN_CORE] COMPLETE (parallel): Final stitch done, output: {final_output}")
+            completion_data = json.dumps({"output_location": final_output, "thumbnail_url": ""})
+            return True, f"[ORCHESTRATOR_COMPLETE]{completion_data}"
+
+        # Still in progress
+        trans_complete = sum(1 for j in existing_joins if is_complete(j))
+        stitch_status = "complete" if existing_final_stitch and is_complete(existing_final_stitch[0]) else "pending"
+        dprint(f"[JOIN_CORE] IDEMPOTENT (parallel): {trans_complete}/{num_joins} transitions, stitch: {stitch_status}")
+        return True, f"[IDEMPOTENT] Parallel: {trans_complete}/{num_joins} transitions complete, stitch: {stitch_status}"
+
+    else:
+        # === CHAIN PATTERN (legacy) ===
+        if len(existing_joins) < num_joins:
+            return None, None
+
+        dprint(f"[JOIN_CORE] All {num_joins} join tasks already exist (chain pattern)")
+
+        all_joins_complete = all(is_complete(join) for join in existing_joins)
+        any_join_failed = any(is_terminal_failure(join) for join in existing_joins)
+
+        if any_join_failed:
+            failed_joins = [j for j in existing_joins if is_terminal_failure(j)]
+            error_msg = f"{len(failed_joins)} join task(s) failed/cancelled"
+            dprint(f"[JOIN_CORE] FAILED: {error_msg}")
+            return False, f"[ORCHESTRATOR_FAILED] {error_msg}"
+
+        if all_joins_complete:
+            def get_join_index(task):
+                params = task.get('task_params', {})
+                if isinstance(params, str):
+                    try:
+                        params = json.loads(params)
+                    except (json.JSONDecodeError, ValueError):
+                        return 0
+                return params.get('join_index', 0)
+
+            sorted_joins = sorted(existing_joins, key=get_join_index)
+            final_join = sorted_joins[-1]
+            final_output = final_join.get('output_location', 'Completed via idempotency')
+
+            final_params = final_join.get('task_params', {})
+            if isinstance(final_params, str):
                 try:
-                    params = json.loads(params)
+                    final_params = json.loads(final_params)
                 except (json.JSONDecodeError, ValueError):
-                    return 0
-            return params.get('join_index', 0)
+                    final_params = {}
 
-        sorted_joins = sorted(existing_joins, key=get_join_index)
-        final_join = sorted_joins[-1]
-        final_output = final_join.get('output_location', 'Completed via idempotency')
+            final_thumbnail = final_params.get('thumbnail_url', '')
 
-        # Extract thumbnail from final join's params
-        final_params = final_join.get('task_params', {})
-        if isinstance(final_params, str):
-            try:
-                final_params = json.loads(final_params)
-            except (json.JSONDecodeError, ValueError):
-                final_params = {}
+            dprint(f"[JOIN_CORE] COMPLETE: All joins finished, final output: {final_output}")
+            completion_data = json.dumps({"output_location": final_output, "thumbnail_url": final_thumbnail})
+            return True, f"[ORCHESTRATOR_COMPLETE]{completion_data}"
 
-        final_thumbnail = final_params.get('thumbnail_url', '')
-
-        dprint(f"[JOIN_CORE] COMPLETE: All joins finished, final output: {final_output}")
-        dprint(f"[JOIN_CORE] Final thumbnail: {final_thumbnail}")
-
-        completion_data = json.dumps({"output_location": final_output, "thumbnail_url": final_thumbnail})
-        return True, f"[ORCHESTRATOR_COMPLETE]{completion_data}"
-
-    # Still in progress
-    complete_count = sum(1 for j in existing_joins if is_complete(j))
-    dprint(f"[JOIN_CORE] IDEMPOTENT: {complete_count}/{num_joins} joins complete")
-    return True, f"[IDEMPOTENT] Join tasks in progress: {complete_count}/{num_joins} complete"
+        complete_count = sum(1 for j in existing_joins if is_complete(j))
+        dprint(f"[JOIN_CORE] IDEMPOTENT: {complete_count}/{num_joins} joins complete")
+        return True, f"[IDEMPOTENT] Join tasks in progress: {complete_count}/{num_joins} complete"
 
 
 def _create_join_chain_tasks(
@@ -566,12 +732,14 @@ def _create_join_chain_tasks(
     dprint
 ) -> Tuple[bool, str]:
     """
-    Core logic: Create chained join_clips_segment tasks.
-    
+    Core logic: Create chained join_clips_segment tasks (LEGACY - sequential pattern).
+
+    DEPRECATED: Use _create_parallel_join_tasks for better quality (avoids re-encoding).
+
     This is the shared core function used by both:
     - join_clips_orchestrator: Provides clip_list directly
     - edit_video_orchestrator: Preprocesses source video into keeper clips first
-    
+
     Args:
         clip_list: List of clip dicts with 'url' and optional 'name' keys
         run_id: Unique run identifier
@@ -583,15 +751,15 @@ def _create_join_chain_tasks(
         orchestrator_project_id: Project ID for authorization
         orchestrator_payload: Full orchestrator payload for reference
         dprint: Debug print function
-        
+
     Returns:
         (success: bool, message: str)
     """
     num_joins = len(clip_list) - 1
-    
+
     if num_joins < 1:
         return False, "clip_list must contain at least 2 clips"
-    
+
     dprint(f"[JOIN_CORE] Creating {num_joins} join tasks in dependency chain")
 
     previous_join_task_id = None
@@ -654,6 +822,161 @@ def _create_join_chain_tasks(
         joins_created += 1
 
     return True, f"Successfully enqueued {joins_created} join tasks for run {run_id}"
+
+
+def _create_parallel_join_tasks(
+    clip_list: List[dict],
+    run_id: str,
+    join_settings: dict,
+    per_join_settings: List[dict],
+    vlm_enhanced_prompts: List[Optional[str]],
+    current_run_output_dir: Path,
+    orchestrator_task_id_str: str,
+    orchestrator_project_id: str | None,
+    orchestrator_payload: dict,
+    dprint
+) -> Tuple[bool, str]:
+    """
+    Create parallel join tasks with a final stitch (NEW - parallel pattern).
+
+    This pattern avoids quality loss from re-encoding:
+    1. Create N-1 transition tasks in parallel (no dependencies between them)
+       - Each task only generates the transition video (transition_only=True)
+    2. Create a single join_final_stitch task that depends on ALL transition tasks
+       - Stitches all original clips + transitions in one pass
+
+    Args:
+        clip_list: List of clip dicts with 'url' and optional 'name' keys
+        run_id: Unique run identifier
+        join_settings: Base settings for all join tasks
+        per_join_settings: Per-join overrides (list, one per join)
+        vlm_enhanced_prompts: VLM-generated prompts (or None for each join)
+        current_run_output_dir: Output directory for this run
+        orchestrator_task_id_str: Orchestrator task ID
+        orchestrator_project_id: Project ID for authorization
+        orchestrator_payload: Full orchestrator payload for reference
+        dprint: Debug print function
+
+    Returns:
+        (success: bool, message: str)
+    """
+    num_joins = len(clip_list) - 1
+
+    if num_joins < 1:
+        return False, "clip_list must contain at least 2 clips"
+
+    dprint(f"[JOIN_PARALLEL] Creating {num_joins} parallel transition tasks + 1 final stitch")
+
+    transition_task_ids = []
+
+    # === Phase 1: Create transition tasks in parallel (no dependencies) ===
+    for idx in range(num_joins):
+        clip_start = clip_list[idx]
+        clip_end = clip_list[idx + 1]
+
+        dprint(f"[JOIN_PARALLEL] Creating transition {idx}: {clip_start.get('name', 'clip')} → {clip_end.get('name', 'clip')}")
+
+        # Merge global settings with per-join overrides
+        task_join_settings = join_settings.copy()
+        if idx < len(per_join_settings):
+            task_join_settings.update(per_join_settings[idx])
+            dprint(f"[JOIN_PARALLEL] Applied per-join overrides for transition {idx}")
+
+        # Apply VLM-enhanced prompt if available (overrides base prompt)
+        if idx < len(vlm_enhanced_prompts) and vlm_enhanced_prompts[idx] is not None:
+            task_join_settings["prompt"] = vlm_enhanced_prompts[idx]
+            dprint(f"[JOIN_PARALLEL] Transition {idx}: Using VLM-enhanced prompt")
+
+        # Build transition payload - each has explicit clip paths, no dependency
+        transition_payload = {
+            "orchestrator_task_id_ref": orchestrator_task_id_str,
+            "orchestrator_run_id": run_id,
+            "project_id": orchestrator_project_id,
+            "join_index": idx,
+            "transition_index": idx,  # Used for ordering in final stitch
+            "is_first_join": False,   # Not relevant for transition_only
+            "is_last_join": False,    # Not relevant for transition_only
+
+            # Both clips are explicit (no dependency fetch)
+            "starting_video_path": clip_start.get("url"),
+            "ending_video_path": clip_end.get("url"),
+
+            # CRITICAL: Enable transition_only mode
+            "transition_only": True,
+
+            # Join settings
+            **task_join_settings,
+
+            # Output configuration
+            "current_run_base_output_dir": str(current_run_output_dir.resolve()),
+            "join_output_dir": str((current_run_output_dir / f"transition_{idx}").resolve()),
+
+            # Reference to full orchestrator payload
+            "full_orchestrator_payload": orchestrator_payload,
+        }
+
+        dprint(f"[JOIN_PARALLEL] Submitting transition {idx} to database (no dependency)")
+
+        # Create task WITHOUT dependency - all transitions run in parallel
+        trans_task_id = db_ops.add_task_to_db(
+            task_payload=transition_payload,
+            task_type_str="join_clips_segment",
+            dependant_on=None  # No dependency - parallel execution
+        )
+
+        dprint(f"[JOIN_PARALLEL] Transition {idx} created with DB ID: {trans_task_id}")
+        transition_task_ids.append(trans_task_id)
+
+    # === Phase 2: Create final stitch task that depends on ALL transitions ===
+    dprint(f"[JOIN_PARALLEL] Creating final stitch task, depends on {len(transition_task_ids)} transitions")
+
+    # Calculate gap splits from join settings
+    replace_mode = join_settings.get("replace_mode", False)
+    gap_frame_count = join_settings.get("gap_frame_count", 53)
+    context_frame_count = join_settings.get("context_frame_count", 8)
+
+    if replace_mode:
+        gap_from_clip1 = gap_frame_count // 2
+        gap_from_clip2 = gap_frame_count - gap_from_clip1
+    else:
+        gap_from_clip1 = 0
+        gap_from_clip2 = 0
+
+    final_stitch_payload = {
+        "orchestrator_task_id_ref": orchestrator_task_id_str,
+        "orchestrator_run_id": run_id,
+        "project_id": orchestrator_project_id,
+
+        # Original clips (for trimming and stitching)
+        "clip_list": clip_list,
+
+        # Transition task IDs to fetch outputs from
+        "transition_task_ids": transition_task_ids,
+
+        # Trimming and blending parameters
+        "gap_from_clip1": gap_from_clip1,
+        "gap_from_clip2": gap_from_clip2,
+        "blend_frames": min(context_frame_count, 15),  # Safe blend limit
+        "fps": join_settings.get("fps") or orchestrator_payload.get("fps", 16),
+
+        # Audio (if provided)
+        "audio_url": orchestrator_payload.get("audio_url"),
+
+        # Output configuration
+        "current_run_base_output_dir": str(current_run_output_dir.resolve()),
+    }
+
+    # Create final stitch task with multi-dependency (all transitions must complete)
+    final_stitch_task_id = db_ops.add_task_to_db(
+        task_payload=final_stitch_payload,
+        task_type_str="join_final_stitch",
+        dependant_on=transition_task_ids  # Multi-dependency: list of task IDs
+    )
+
+    dprint(f"[JOIN_PARALLEL] Final stitch task created with DB ID: {final_stitch_task_id}")
+    dprint(f"[JOIN_PARALLEL] Complete: {num_joins} transitions + 1 final stitch = {num_joins + 1} total tasks")
+
+    return True, f"Successfully enqueued {num_joins} parallel transitions + 1 final stitch for run {run_id}"
 
 
 def _handle_join_clips_orchestrator_task(
@@ -793,6 +1116,35 @@ def _handle_join_clips_orchestrator_task(
         current_run_output_dir.mkdir(parents=True, exist_ok=True)
         dprint(f"[JOIN_ORCHESTRATOR] Run output directory: {current_run_output_dir}")
 
+        # === VALIDATE CLIP FRAME COUNTS (optional, enabled by default) ===
+        skip_validation = orchestrator_payload.get("skip_frame_validation", False)
+        if not skip_validation:
+            validation_temp_dir = current_run_output_dir / "validation_temp"
+            validation_temp_dir.mkdir(parents=True, exist_ok=True)
+
+            is_valid, validation_message, frame_counts = validate_clip_frames_for_join(
+                clip_list=clip_list,
+                gap_frame_count=join_settings.get("gap_frame_count", 53),
+                context_frame_count=join_settings.get("context_frame_count", 8),
+                replace_mode=join_settings.get("replace_mode", False),
+                temp_dir=validation_temp_dir,
+                orchestrator_task_id=orchestrator_task_id_str,
+                dprint=dprint
+            )
+
+            if not is_valid:
+                # Actual failure (download error, missing URL, etc.)
+                dprint(f"[JOIN_ORCHESTRATOR] VALIDATION FAILED: {validation_message}")
+                return False, f"Clip frame validation failed: {validation_message}"
+
+            if validation_message:
+                # Warning about proportional reduction (will proceed anyway)
+                dprint(f"[JOIN_ORCHESTRATOR] {validation_message}")
+
+            dprint(f"[JOIN_ORCHESTRATOR] Clip frame validation complete, frame counts: {frame_counts}")
+        else:
+            dprint(f"[JOIN_ORCHESTRATOR] Frame validation skipped (skip_frame_validation=True)")
+
         # === VLM PROMPT ENHANCEMENT (optional) ===
         enhance_prompt = orchestrator_payload.get("enhance_prompt", False)
         vlm_enhanced_prompts: List[Optional[str]] = [None] * num_joins
@@ -844,20 +1196,39 @@ def _handle_join_clips_orchestrator_task(
         else:
             dprint(f"[JOIN_ORCHESTRATOR] enhance_prompt=False, using base prompt for all joins")
 
-        # === CREATE JOIN CHAIN (using shared core function) ===
-        success, message = _create_join_chain_tasks(
-            clip_list=clip_list,
-            run_id=run_id,
-            join_settings=join_settings,
-            per_join_settings=per_join_settings,
-            vlm_enhanced_prompts=vlm_enhanced_prompts,
-            current_run_output_dir=current_run_output_dir,
-            orchestrator_task_id_str=orchestrator_task_id_str,
-            orchestrator_project_id=orchestrator_project_id,
-            orchestrator_payload=orchestrator_payload,
-            dprint=dprint
-        )
-        
+        # === CREATE JOIN TASKS ===
+        # Choose between parallel pattern (new, better quality) and chain pattern (legacy)
+        use_parallel = orchestrator_payload.get("use_parallel_joins", True)  # Default to parallel
+
+        if use_parallel:
+            dprint(f"[JOIN_ORCHESTRATOR] Using PARALLEL pattern (transitions in parallel + final stitch)")
+            success, message = _create_parallel_join_tasks(
+                clip_list=clip_list,
+                run_id=run_id,
+                join_settings=join_settings,
+                per_join_settings=per_join_settings,
+                vlm_enhanced_prompts=vlm_enhanced_prompts,
+                current_run_output_dir=current_run_output_dir,
+                orchestrator_task_id_str=orchestrator_task_id_str,
+                orchestrator_project_id=orchestrator_project_id,
+                orchestrator_payload=orchestrator_payload,
+                dprint=dprint
+            )
+        else:
+            dprint(f"[JOIN_ORCHESTRATOR] Using CHAIN pattern (legacy sequential)")
+            success, message = _create_join_chain_tasks(
+                clip_list=clip_list,
+                run_id=run_id,
+                join_settings=join_settings,
+                per_join_settings=per_join_settings,
+                vlm_enhanced_prompts=vlm_enhanced_prompts,
+                current_run_output_dir=current_run_output_dir,
+                orchestrator_task_id_str=orchestrator_task_id_str,
+                orchestrator_project_id=orchestrator_project_id,
+                orchestrator_payload=orchestrator_payload,
+                dprint=dprint
+            )
+
         dprint(f"[JOIN_ORCHESTRATOR] {message}")
         return success, message
 

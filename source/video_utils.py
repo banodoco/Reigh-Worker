@@ -548,6 +548,10 @@ def extract_frame_range_to_video(
         'ffmpeg', '-y',
         '-i', str(source_video),
         '-vf', filter_str,
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-preset', 'slow',  # Better quality at same bitrate
+        '-crf', '10',  # Near-lossless quality for intermediate files
         '-r', str(fps),
         '-an',  # No audio
         str(output_path)
@@ -636,8 +640,8 @@ def create_video_from_frames_list(
         "-i", "-",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-preset", "medium",
-        "-crf", "18",  # Visually lossless quality
+        "-preset", "slow",  # Better quality at same bitrate
+        "-crf", "10",  # Near-lossless quality for intermediate files
     ]
     
     # Add colorspace standardization if requested
@@ -796,6 +800,7 @@ def _apply_saturation_to_video_ffmpeg(
         "-i", str(inp.resolve()),
         "-vf", f"eq=saturation={saturation_level}",
         "-c:v", "libx264",
+        "-crf", "10",  # Near-lossless quality for intermediate files
         "-preset", preset,
         "-pix_fmt", "yuv420p",
         "-an",
@@ -1944,7 +1949,7 @@ def overlay_start_end_images_above_video(
                     "-map", "[output]",
                     "-r", str(int(round(fps))),  # set output fps
                     "-shortest",  # stop when primary video stream ends
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart",
                     str(output_video_path.resolve()),
                 ]
@@ -2021,8 +2026,8 @@ def reverse_video(
     if not input_fps:
         input_fps = 16  # Default fallback
     
-    # Use ffmpeg to reverse the video with visually lossless quality
-    # -crf 17: Visually lossless (17-18 is considered transparent quality)
+    # Use ffmpeg to reverse the video with near-lossless quality
+    # -crf 10: Near-lossless for intermediate files (minimizes generation loss)
     # -preset slow: Better compression efficiency, maintains quality
     # -r: Preserve exact framerate from input
     cmd = [
@@ -2031,7 +2036,7 @@ def reverse_video(
         '-vf', 'reverse',
         '-an',  # No audio (reversed audio sounds bad anyway)
         '-c:v', 'libx264',
-        '-crf', '17',  # Visually lossless quality
+        '-crf', '10',  # Near-lossless quality for intermediate files
         '-preset', 'slow',  # Better quality at same bitrate
         '-pix_fmt', 'yuv420p',
         '-r', str(input_fps),  # Preserve exact framerate

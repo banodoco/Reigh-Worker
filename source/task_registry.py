@@ -30,7 +30,7 @@ from source.comfy_handler import handle_comfy_task
 from source.task_engine_router import route_task, COMFY_TASK_TYPES
 from source.sm_functions import travel_between_images as tbi
 from source.sm_functions import magic_edit as me
-from source.sm_functions.join_clips import _handle_join_clips_task
+from source.sm_functions.join_clips import _handle_join_clips_task, _handle_join_final_stitch
 from source.sm_functions.join_clips_orchestrator import _handle_join_clips_orchestrator_task
 from source.sm_functions.edit_video_orchestrator import _handle_edit_video_orchestrator_task
 from source.sm_functions.inpaint_frames import _handle_inpaint_frames_task
@@ -1062,6 +1062,12 @@ class TaskRegistry:
                 main_output_dir_base=context["main_output_dir_base"],
                 task_id=task_id,
                 task_queue=context["task_queue"],
+                dprint=dprint_func
+            ),
+            "join_final_stitch": lambda: _handle_join_final_stitch(
+                task_params_from_db=params,
+                main_output_dir_base=context["main_output_dir_base"],
+                task_id=task_id,
                 dprint=dprint_func
             ),
             "inpaint_frames": lambda: _handle_inpaint_frames_task(

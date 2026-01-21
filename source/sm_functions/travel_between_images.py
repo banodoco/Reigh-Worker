@@ -2635,8 +2635,8 @@ def attempt_ffmpeg_crossfade_fallback(segment_video_paths: list[str], overlaps: 
         # Add output parameters
         cmd.extend([
             "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "18",
+            "-preset", "slow",
+            "-crf", "10",  # Near-lossless quality for intermediate files
             "-pix_fmt", "yuv420p",
             str(output_path)
         ])

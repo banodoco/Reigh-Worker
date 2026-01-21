@@ -261,8 +261,8 @@ def create_travel_visualization(
         fps=fps,
         codec='libx264',
         audio=False,
-        preset='medium',
-        ffmpeg_params=['-pix_fmt', 'yuv420p'],  # Force compatible pixel format
+        preset='slow',
+        ffmpeg_params=['-crf', '10', '-pix_fmt', 'yuv420p'],  # Near-lossless quality
         logger=None  # Suppress moviepy progress bar
     )
 
@@ -1063,7 +1063,8 @@ def create_simple_comparison(
         output_path,
         codec='libx264',
         audio=False,
-        preset='medium',
+        preset='slow',
+        ffmpeg_params=['-crf', '10', '-pix_fmt', 'yuv420p'],  # Near-lossless quality
         logger=None
     )
 
