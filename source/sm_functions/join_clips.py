@@ -1076,6 +1076,69 @@ def _handle_join_clips_task(
                         dprint(f"[JOIN_CLIPS]   gap_splits: ({gap_from_clip1}, {gap_from_clip2})")
                         dprint(f"[JOIN_CLIPS]   blend_frames={actual_blend}")
 
+                        # === OFFSET DETECTION AT SOURCE: Verify transition context matches original clips ===
+                        # Compare transition frames against original clip frames at different offsets
+                        # to detect if VACE shifted the alignment
+                        try:
+                            import numpy as np
+                            transition_frames = sm_extract_frames_from_video(str(transition_output_path), dprint_func=dprint)
+                            if transition_frames and start_all_frames and end_all_frames:
+                                dprint(f"[OFFSET_DETECT_SOURCE] Task {task_id}: Verifying transition alignment at source...")
+
+                                # Check START context: trans[0] should match clip1[context_start_idx]
+                                dprint(f"[OFFSET_DETECT_SOURCE]   Comparing trans[0] vs clip1 frames around index {context_start_idx}")
+                                trans_first = transition_frames[0].astype(float)
+                                for offset in range(-2, 3):
+                                    test_idx = context_start_idx + offset
+                                    if 0 <= test_idx < len(start_all_frames):
+                                        test_frame = start_all_frames[test_idx].astype(float)
+                                        diff = np.abs(trans_first - test_frame).mean()
+                                        marker = " <<<" if offset == 0 else ""
+                                        dprint(f"[OFFSET_DETECT_SOURCE]     offset={offset:+d} (clip1[{test_idx}]): diff={diff:.2f}{marker}")
+
+                                # Check END context: trans[-1] should match clip2[gap_from_clip2 + context_from_clip2 - 1]
+                                expected_clip2_last = gap_from_clip2 + context_from_clip2 - 1
+                                dprint(f"[OFFSET_DETECT_SOURCE]   Comparing trans[-1] vs clip2 frames around index {expected_clip2_last}")
+                                trans_last = transition_frames[-1].astype(float)
+                                for offset in range(-2, 3):
+                                    test_idx = expected_clip2_last + offset
+                                    if 0 <= test_idx < len(end_all_frames):
+                                        test_frame = end_all_frames[test_idx].astype(float)
+                                        diff = np.abs(trans_last - test_frame).mean()
+                                        marker = " <<<" if offset == 0 else ""
+                                        dprint(f"[OFFSET_DETECT_SOURCE]     offset={offset:+d} (clip2[{test_idx}]): diff={diff:.2f}{marker}")
+
+                                # Find best offset for both START and END
+                                start_diffs = {}
+                                for offset in range(-2, 3):
+                                    test_idx = context_start_idx + offset
+                                    if 0 <= test_idx < len(start_all_frames):
+                                        diff = np.abs(trans_first - start_all_frames[test_idx].astype(float)).mean()
+                                        start_diffs[offset] = diff
+                                end_diffs = {}
+                                for offset in range(-2, 3):
+                                    test_idx = expected_clip2_last + offset
+                                    if 0 <= test_idx < len(end_all_frames):
+                                        diff = np.abs(trans_last - end_all_frames[test_idx].astype(float)).mean()
+                                        end_diffs[offset] = diff
+
+                                if start_diffs:
+                                    best_start = min(start_diffs, key=start_diffs.get)
+                                    dprint(f"[OFFSET_DETECT_SOURCE]   START best match: offset={best_start:+d} (diff={start_diffs[best_start]:.2f})")
+                                if end_diffs:
+                                    best_end = min(end_diffs, key=end_diffs.get)
+                                    dprint(f"[OFFSET_DETECT_SOURCE]   END best match: offset={best_end:+d} (diff={end_diffs[best_end]:.2f})")
+
+                                if start_diffs and end_diffs:
+                                    best_start = min(start_diffs, key=start_diffs.get)
+                                    best_end = min(end_diffs, key=end_diffs.get)
+                                    if best_start != 0 or best_end != 0:
+                                        dprint(f"[OFFSET_DETECT_SOURCE]   >>> ALIGNMENT ISSUE DETECTED AT SOURCE! start_offset={best_start:+d}, end_offset={best_end:+d}")
+                                    else:
+                                        dprint(f"[OFFSET_DETECT_SOURCE]   >>> Alignment looks correct at source (both offsets = 0)")
+                        except Exception as e:
+                            dprint(f"[OFFSET_DETECT_SOURCE] Task {task_id}: Error during offset detection: {e}")
+
                         # Build comprehensive debugging data for the output_location
                         # This helps diagnose alignment issues in the final stitch
 
@@ -1714,6 +1777,53 @@ def _handle_join_final_stitch(
                                 dprint(f"[PIXEL_CHECK] ⚠️ Transition {i} START context: MISMATCH DETECTED!")
                                 dprint(f"[PIXEL_CHECK]   First frame diff: {diff_first:.2f}, Last frame diff: {diff_last:.2f}")
                                 dprint(f"[PIXEL_CHECK]   Clip frames [{clip_ctx_start}:{clip_ctx_end}] vs Transition frames [0:{ctx1}]")
+
+                            # === OFFSET DETECTION: Compare trans[0] against clip frames at different offsets ===
+                            # This helps identify if there's a systematic frame shift
+                            dprint(f"[OFFSET_DETECT] Transition {i} START: Comparing trans[0] against clip frames at offsets -2 to +2")
+                            dprint(f"[OFFSET_DETECT]   Expected alignment: trans[0] should match clip[{clip_ctx_start}]")
+
+                            trans_first_frame = trans_context[0].astype(float)
+                            offset_diffs = {}
+                            for offset in range(-2, 3):  # -2, -1, 0, +1, +2
+                                test_idx = clip_ctx_start + offset
+                                if 0 <= test_idx < len(clip_frames_list):
+                                    test_frame = clip_frames_list[test_idx].astype(float)
+                                    diff = np.abs(trans_first_frame - test_frame).mean()
+                                    offset_diffs[offset] = diff
+                                    dprint(f"[OFFSET_DETECT]   offset={offset:+d} (clip[{test_idx}]): diff={diff:.2f}")
+
+                            # Find best matching offset
+                            if offset_diffs:
+                                best_offset = min(offset_diffs, key=offset_diffs.get)
+                                best_diff = offset_diffs[best_offset]
+                                if best_offset != 0:
+                                    dprint(f"[OFFSET_DETECT]   >>> BEST MATCH at offset={best_offset:+d} (diff={best_diff:.2f}) - ALIGNMENT BUG DETECTED!")
+                                else:
+                                    dprint(f"[OFFSET_DETECT]   >>> Best match at offset=0 (diff={best_diff:.2f}) - alignment appears correct")
+
+                            # Also check the LAST frame of context for offset
+                            dprint(f"[OFFSET_DETECT] Transition {i} START: Comparing trans[{ctx1-1}] against clip frames at offsets -2 to +2")
+                            trans_last_ctx_frame = trans_context[-1].astype(float)
+                            expected_last_idx = clip_ctx_end - 1  # Last frame of context
+                            dprint(f"[OFFSET_DETECT]   Expected alignment: trans[{ctx1-1}] should match clip[{expected_last_idx}]")
+
+                            offset_diffs_last = {}
+                            for offset in range(-2, 3):
+                                test_idx = expected_last_idx + offset
+                                if 0 <= test_idx < len(clip_frames_list):
+                                    test_frame = clip_frames_list[test_idx].astype(float)
+                                    diff = np.abs(trans_last_ctx_frame - test_frame).mean()
+                                    offset_diffs_last[offset] = diff
+                                    dprint(f"[OFFSET_DETECT]   offset={offset:+d} (clip[{test_idx}]): diff={diff:.2f}")
+
+                            if offset_diffs_last:
+                                best_offset_last = min(offset_diffs_last, key=offset_diffs_last.get)
+                                best_diff_last = offset_diffs_last[best_offset_last]
+                                if best_offset_last != 0:
+                                    dprint(f"[OFFSET_DETECT]   >>> BEST MATCH at offset={best_offset_last:+d} (diff={best_diff_last:.2f}) - ALIGNMENT BUG DETECTED!")
+                                else:
+                                    dprint(f"[OFFSET_DETECT]   >>> Best match at offset=0 (diff={best_diff_last:.2f}) - alignment appears correct")
                         else:
                             dprint(f"[PIXEL_CHECK] ⚠️ Transition {i}: Frame count mismatch for START context")
                             dprint(f"[PIXEL_CHECK]   Expected {ctx1}, got clip={len(clip_context)}, trans={len(trans_context)}")
@@ -1744,6 +1854,52 @@ def _handle_join_final_stitch(
                                 dprint(f"[PIXEL_CHECK] ⚠️ Transition {i} END context: MISMATCH DETECTED!")
                                 dprint(f"[PIXEL_CHECK]   First frame diff: {diff_first:.2f}, Last frame diff: {diff_last:.2f}")
                                 dprint(f"[PIXEL_CHECK]   Next clip frames [{gap2}:{gap2 + ctx2}] vs Transition frames [-{ctx2}:]")
+
+                            # === OFFSET DETECTION for END context ===
+                            dprint(f"[OFFSET_DETECT] Transition {i} END: Comparing trans[-{ctx2}] against next_clip frames at offsets -2 to +2")
+                            expected_clip2_start = gap2
+                            dprint(f"[OFFSET_DETECT]   Expected alignment: trans[-{ctx2}] should match next_clip[{expected_clip2_start}]")
+
+                            trans_end_first_frame = trans_end_context[0].astype(float)
+                            offset_diffs_end = {}
+                            for offset in range(-2, 3):
+                                test_idx = expected_clip2_start + offset
+                                if 0 <= test_idx < len(next_clip_frames):
+                                    test_frame = next_clip_frames[test_idx].astype(float)
+                                    diff = np.abs(trans_end_first_frame - test_frame).mean()
+                                    offset_diffs_end[offset] = diff
+                                    dprint(f"[OFFSET_DETECT]   offset={offset:+d} (next_clip[{test_idx}]): diff={diff:.2f}")
+
+                            if offset_diffs_end:
+                                best_offset_end = min(offset_diffs_end, key=offset_diffs_end.get)
+                                best_diff_end = offset_diffs_end[best_offset_end]
+                                if best_offset_end != 0:
+                                    dprint(f"[OFFSET_DETECT]   >>> BEST MATCH at offset={best_offset_end:+d} (diff={best_diff_end:.2f}) - ALIGNMENT BUG DETECTED!")
+                                else:
+                                    dprint(f"[OFFSET_DETECT]   >>> Best match at offset=0 (diff={best_diff_end:.2f}) - alignment appears correct")
+
+                            # Also check last frame of END context
+                            dprint(f"[OFFSET_DETECT] Transition {i} END: Comparing trans[-1] against next_clip frames at offsets -2 to +2")
+                            expected_clip2_end = gap2 + ctx2 - 1
+                            dprint(f"[OFFSET_DETECT]   Expected alignment: trans[-1] should match next_clip[{expected_clip2_end}]")
+
+                            trans_very_last_frame = trans_end_context[-1].astype(float)
+                            offset_diffs_end_last = {}
+                            for offset in range(-2, 3):
+                                test_idx = expected_clip2_end + offset
+                                if 0 <= test_idx < len(next_clip_frames):
+                                    test_frame = next_clip_frames[test_idx].astype(float)
+                                    diff = np.abs(trans_very_last_frame - test_frame).mean()
+                                    offset_diffs_end_last[offset] = diff
+                                    dprint(f"[OFFSET_DETECT]   offset={offset:+d} (next_clip[{test_idx}]): diff={diff:.2f}")
+
+                            if offset_diffs_end_last:
+                                best_offset_end_last = min(offset_diffs_end_last, key=offset_diffs_end_last.get)
+                                best_diff_end_last = offset_diffs_end_last[best_offset_end_last]
+                                if best_offset_end_last != 0:
+                                    dprint(f"[OFFSET_DETECT]   >>> BEST MATCH at offset={best_offset_end_last:+d} (diff={best_diff_end_last:.2f}) - ALIGNMENT BUG DETECTED!")
+                                else:
+                                    dprint(f"[OFFSET_DETECT]   >>> Best match at offset=0 (diff={best_diff_end_last:.2f}) - alignment appears correct")
                         else:
                             dprint(f"[PIXEL_CHECK] ⚠️ Transition {i}: Frame count mismatch for END context")
                 except Exception as e:
