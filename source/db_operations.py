@@ -963,6 +963,90 @@ def update_task_status_supabase(task_id_str, status_str, output_location_val=Non
                 # Not a local file, could be a Supabase storage URL or external reference
                 # Check if it's a Supabase storage URL - if so, extract storage_path for MODE 3/4
                 storage_path = None
+
+                # SPECIAL CASE: JSON output containing a storage URL (e.g., transition_only mode)
+                # JSON outputs contain metadata along with a file URL - we need to:
+                # 1. Extract the actual file URL from the JSON
+                # 2. Use that URL's storage_path for the edge function to mark complete
+                # 3. Update output_location with the full JSON afterward
+                if output_location_val.strip().startswith('{') and output_location_val.strip().endswith('}'):
+                    try:
+                        json_output = json.loads(output_location_val)
+                        # Look for common URL fields in the JSON
+                        url_in_json = (
+                            json_output.get("transition_url") or
+                            json_output.get("url") or
+                            json_output.get("output_url") or
+                            json_output.get("video_url")
+                        )
+                        if url_in_json and "/storage/v1/object/public/image_uploads/" in url_in_json:
+                            # Extract storage_path from the URL inside the JSON
+                            path_parts = url_in_json.split("/storage/v1/object/public/image_uploads/", 1)
+                            if len(path_parts) == 2:
+                                storage_path = path_parts[1]
+                                dprint(f"[DEBUG] JSON output detected - extracted storage_path: {storage_path}")
+
+                                # Step 1: Complete task with storage_path (marks as complete)
+                                payload = {
+                                    "task_id": task_id_str,
+                                    "storage_path": storage_path,
+                                }
+                                dprint(f"[DEBUG] Completing task {task_id_str} with storage_path (JSON output mode)")
+
+                                headers = {"Content-Type": "application/json"}
+                                if SUPABASE_ACCESS_TOKEN:
+                                    headers["Authorization"] = f"Bearer {SUPABASE_ACCESS_TOKEN}"
+
+                                resp, edge_error = _call_edge_function_with_retry(
+                                    edge_url=edge_url,
+                                    payload=payload,
+                                    headers=headers,
+                                    function_name="complete_task",
+                                    context_id=task_id_str,
+                                    timeout=30,
+                                    max_retries=3,
+                                    fallback_url=None,
+                                )
+
+                                if resp is not None and resp.status_code == 200:
+                                    dprint(f"[DEBUG] Task {task_id_str} marked complete, now updating output_location with JSON")
+
+                                    # Step 2: Update output_location with full JSON metadata
+                                    # Use update-task-status to overwrite output_location with JSON
+                                    update_url = (
+                                        os.getenv("SUPABASE_EDGE_UPDATE_TASK_STATUS_URL") or
+                                        (f"{SUPABASE_URL.rstrip('/')}/functions/v1/update-task-status" if SUPABASE_URL else None)
+                                    )
+                                    if update_url:
+                                        update_payload = {
+                                            "task_id": task_id_str,
+                                            "status": STATUS_COMPLETE,
+                                            "output_location": output_location_val  # Full JSON
+                                        }
+                                        update_resp, update_error = _call_edge_function_with_retry(
+                                            edge_url=update_url,
+                                            payload=update_payload,
+                                            headers=headers,
+                                            function_name="update-task-status",
+                                            context_id=task_id_str,
+                                            timeout=30,
+                                            max_retries=2,
+                                            fallback_url=None,
+                                        )
+                                        if update_resp and update_resp.status_code == 200:
+                                            dprint(f"[DEBUG] Output location updated with JSON for task {task_id_str}")
+                                        else:
+                                            dprint(f"[DEBUG] Failed to update output_location with JSON: {update_error}")
+                                            # Task is still complete, just without JSON metadata
+                                    return None
+                                else:
+                                    error_msg = edge_error or f"{EDGE_FAIL_PREFIX}:complete_task:HTTP_{resp.status_code if resp else 'N/A'}] {resp.text[:200] if resp else 'No response'}"
+                                    print(f"[ERROR] {error_msg}")
+                                    _mark_task_failed_via_edge_function(task_id_str, f"Completion failed: {error_msg}")
+                                    return None
+                    except json.JSONDecodeError:
+                        dprint(f"[DEBUG] Output looks like JSON but failed to parse, treating as regular output")
+
                 if "/storage/v1/object/public/image_uploads/" in output_location_val:
                     # Extract storage path from URL
                     # Format: https://xxx.supabase.co/storage/v1/object/public/image_uploads/{userId}/{filename}

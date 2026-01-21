@@ -30,7 +30,8 @@ from ..common_utils import (
     download_video_if_url,
     save_frame_from_video,
     prepare_output_path_with_upload,
-    upload_and_get_final_output_location
+    upload_and_get_final_output_location,
+    upload_intermediate_file_to_storage
 )
 from ..video_utils import (
     extract_frames_from_video as sm_extract_frames_from_video,
@@ -999,8 +1000,11 @@ def _handle_join_clips_task(
                     if transition_only:
                         dprint(f"[JOIN_CLIPS] Task {task_id}: transition_only mode - uploading transition video directly")
 
-                        # Upload transition video and return
-                        transition_output_path, initial_db_location = prepare_output_path_with_upload(
+                        # Upload transition video to storage FIRST (before returning JSON)
+                        # This is critical: we return JSON with metadata, so we need to upload
+                        # the file ourselves rather than relying on the completion logic
+                        # (which expects a simple file path, not JSON)
+                        transition_output_path, _ = prepare_output_path_with_upload(
                             task_id=task_id,
                             filename=f"{task_id}_transition.mp4",
                             main_output_dir_base=main_output_dir_base,
@@ -1012,25 +1016,30 @@ def _handle_join_clips_task(
                         import shutil
                         shutil.copy2(transition_video_path, transition_output_path)
 
-                        # Upload and get final location
-                        final_db_location = upload_and_get_final_output_location(
+                        # Upload to Supabase storage and get public URL
+                        # Must use upload_intermediate_file_to_storage because we're returning JSON,
+                        # not a simple file path that the completion logic can handle
+                        storage_url = upload_intermediate_file_to_storage(
                             local_file_path=transition_output_path,
-                            supabase_object_name=task_id,  # unused but required for compatibility
-                            initial_db_location=initial_db_location,
+                            task_id=task_id,
+                            filename=f"{task_id}_transition.mp4",
                             dprint=dprint
                         )
 
-                        dprint(f"[JOIN_CLIPS] Task {task_id}: transition_only complete - {final_db_location}")
+                        if not storage_url:
+                            return False, f"Failed to upload transition video to storage"
 
-                        # Return transition metadata for the final stitch task
-                        # Include trim info so the stitch task knows how to handle clips
-                        # Use ACTUAL context values (may be reduced from requested if clips were short)
+                        dprint(f"[JOIN_CLIPS] Task {task_id}: transition_only complete - {storage_url}")
+
+                        # Return transition metadata as JSON
+                        # The completion logic in db_operations handles JSON outputs specially:
+                        # it extracts the storage_path from the URL and stores the full JSON in output_location
                         actual_ctx_clip1 = context_from_clip1 if replace_mode else context_frame_count
                         actual_ctx_clip2 = context_from_clip2 if replace_mode else context_frame_count
                         actual_blend = min(actual_ctx_clip1, actual_ctx_clip2, max_safe_blend)
 
                         return True, json.dumps({
-                            "transition_url": final_db_location,
+                            "transition_url": storage_url,
                             "transition_index": task_params_from_db.get("transition_index", 0),
                             "frames": actual_transition_frames,
                             "gap_from_clip1": gap_from_clip1,
