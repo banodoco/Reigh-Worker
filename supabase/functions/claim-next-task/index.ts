@@ -170,7 +170,7 @@ serve(async (req) => {
       // Get all queued tasks and manually check dependencies
       const { data: queuedTasks, error: findError } = await supabaseAdmin
         .from("tasks")
-        .select("id, params, task_type, project_id, created_at, dependant_on")
+        .select("id, params, task_type, project_id, created_at, dependant_on, attempts")
         .eq("status", "Queued")
         .order("created_at", { ascending: true });
 
@@ -236,7 +236,8 @@ serve(async (req) => {
             task_id_out: updateData.id,
             params_out: updateData.params,
             task_type_out: updateData.task_type,
-            project_id_out: updateData.project_id
+            project_id_out: updateData.project_id,
+            attempts_out: updateData.attempts || 0
           }],
           error: null
         };
@@ -272,7 +273,7 @@ serve(async (req) => {
             
             const { data: userQueuedTasks, error: userFindError } = await supabaseAdmin
               .from("tasks")
-              .select("id, params, task_type, project_id, created_at, dependant_on")
+              .select("id, params, task_type, project_id, created_at, dependant_on, attempts")
               .eq("status", "Queued")
               .in("project_id", projectIds)
               .order("created_at", { ascending: true });
@@ -346,7 +347,8 @@ serve(async (req) => {
                   task_id_out: updateData.id,
                   params_out: updateData.params,
                   task_type_out: updateData.task_type,
-                  project_id_out: updateData.project_id
+                  project_id_out: updateData.project_id,
+                  attempts_out: updateData.attempts || 0
                 }],
                 error: null
               };
@@ -376,14 +378,15 @@ serve(async (req) => {
     }
 
     const task = rpcResponse.data[0];
-    console.log(`Successfully claimed task ${task.task_id_out}`);
+    console.log(`Successfully claimed task ${task.task_id_out} (attempts: ${task.attempts_out || 0})`);
 
     // Return the task data
     return new Response(JSON.stringify({
       task_id: task.task_id_out,
       params: task.params_out,
       task_type: task.task_type_out,
-      project_id: task.project_id_out
+      project_id: task.project_id_out,
+      attempts: task.attempts_out || 0
     }), {
       status: 200,
       headers: { "Content-Type": "application/json" }

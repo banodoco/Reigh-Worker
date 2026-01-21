@@ -56,7 +56,7 @@ if wan2gp_path not in sys.path:
     sys.path.append(wan2gp_path)
 
 from source import db_operations as db_ops
-from source.fatal_error_handler import FatalWorkerError, reset_fatal_error_counter
+from source.fatal_error_handler import FatalWorkerError, reset_fatal_error_counter, is_retryable_error
 from headless_model_management import HeadlessTaskQueue
 
 from source.logging_utils import (
@@ -438,7 +438,30 @@ def main():
                     
                     cleanup_generated_files(output_location, current_task_id, debug_mode)
             else:
-                db_ops.update_task_status_supabase(current_task_id, db_ops.STATUS_FAILED, output_location)
+                # Task failed - check if this is a retryable error
+                error_message = output_location or "Unknown error"
+                is_retryable, error_category, max_attempts = is_retryable_error(error_message)
+                current_attempts = task_info.get("attempts", 0)
+                
+                if is_retryable and current_attempts < max_attempts:
+                    # Requeue for retry
+                    headless_logger.warning(
+                        f"Task {current_task_id} failed with retryable error ({error_category}), "
+                        f"requeuing for retry (attempt {current_attempts + 1}/{max_attempts})"
+                    )
+                    db_ops.requeue_task_for_retry(
+                        current_task_id, 
+                        error_message, 
+                        current_attempts, 
+                        error_category
+                    )
+                else:
+                    # Permanent failure - either not retryable or exhausted retries
+                    if is_retryable and current_attempts >= max_attempts:
+                        headless_logger.error(
+                            f"Task {current_task_id} exhausted {max_attempts} retry attempts for {error_category}"
+                        )
+                    db_ops.update_task_status_supabase(current_task_id, db_ops.STATUS_FAILED, output_location)
             
             # Clear task context from log interceptor
             if _log_interceptor_instance:

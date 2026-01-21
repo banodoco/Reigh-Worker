@@ -307,6 +307,110 @@ def _mark_task_failed_via_edge_function(task_id_str: str, error_message: str):
     elif resp:
         print(f"[ERROR] Failed to mark task {task_id_str} as Failed: {resp.status_code} - {resp.text}")
 
+
+def requeue_task_for_retry(task_id_str: str, error_message: str, current_attempts: int, error_category: str = None) -> bool:
+    """
+    Reset a task to Queued status for retry, incrementing the attempts counter.
+    
+    This is used for transient errors (OOM, edge function failures, etc.) that may
+    succeed on a subsequent attempt.
+    
+    Args:
+        task_id_str: Task ID to requeue
+        error_message: Error message from the failed attempt
+        current_attempts: Current attempt count (will be incremented)
+        error_category: Optional category of the retryable error
+    
+    Returns:
+        True if task was successfully requeued, False otherwise
+    """
+    new_attempts = current_attempts + 1
+    
+    # Build error details message
+    error_details = f"Retry {new_attempts}"
+    if error_category:
+        error_details += f" ({error_category})"
+    error_details += f": {error_message[:500]}" if error_message else ""
+    
+    print(f"[RETRY] 🔄 Requeuing task {task_id_str} for retry (attempt {new_attempts})")
+    dprint(f"[RETRY_DEBUG] Error category: {error_category}, Error: {error_message[:200] if error_message else 'N/A'}...")
+    
+    # Use edge function to update status back to Queued
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_UPDATE_TASK_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/update-task-status" if SUPABASE_URL else None)
+    )
+    
+    if not edge_url:
+        print(f"[ERROR] No update-task-status edge function URL available for requeuing task {task_id_str}")
+        # Fallback to direct DB update
+        return _requeue_task_direct_db(task_id_str, new_attempts, error_details)
+    
+    headers = {"Content-Type": "application/json"}
+    if SUPABASE_ACCESS_TOKEN:
+        headers["Authorization"] = f"Bearer {SUPABASE_ACCESS_TOKEN}"
+    
+    payload = {
+        "task_id": task_id_str,
+        "status": STATUS_QUEUED,
+        "attempts": new_attempts,
+        "error_details": error_details,
+        "clear_worker": True,  # Signal to clear worker_id assignment
+    }
+    
+    resp, edge_error = _call_edge_function_with_retry(
+        edge_url=edge_url,
+        payload=payload,
+        headers=headers,
+        function_name="update-task-status",
+        context_id=task_id_str,
+        timeout=30,
+        max_retries=3,
+    )
+    
+    if resp and resp.status_code == 200:
+        print(f"[RETRY] ✅ Task {task_id_str} requeued for retry (attempt {new_attempts})")
+        return True
+    elif edge_error:
+        print(f"[ERROR] Failed to requeue task {task_id_str}: {edge_error}")
+        # Fallback to direct DB update
+        return _requeue_task_direct_db(task_id_str, new_attempts, error_details)
+    elif resp:
+        print(f"[ERROR] Failed to requeue task {task_id_str}: {resp.status_code} - {resp.text}")
+        # Fallback to direct DB update
+        return _requeue_task_direct_db(task_id_str, new_attempts, error_details)
+    
+    return False
+
+
+def _requeue_task_direct_db(task_id_str: str, new_attempts: int, error_details: str) -> bool:
+    """
+    Fallback: Requeue task directly via Supabase client if edge function fails.
+    """
+    if not SUPABASE_CLIENT:
+        print(f"[ERROR] No Supabase client available for direct DB requeue of task {task_id_str}")
+        return False
+    
+    try:
+        result = SUPABASE_CLIENT.table(PG_TABLE_NAME).update({
+            "status": STATUS_QUEUED,
+            "worker_id": None,
+            "attempts": new_attempts,
+            "error_details": error_details,
+            "generation_started_at": None,
+        }).eq("id", task_id_str).execute()
+        
+        if result.data:
+            print(f"[RETRY] ✅ Task {task_id_str} requeued via direct DB (attempt {new_attempts})")
+            return True
+        else:
+            print(f"[ERROR] Direct DB requeue returned no data for task {task_id_str}")
+            return False
+    except Exception as e:
+        print(f"[ERROR] Direct DB requeue failed for task {task_id_str}: {e}")
+        return False
+
+
 # -----------------------------------------------------------------------------
 # Public Database Functions
 # -----------------------------------------------------------------------------

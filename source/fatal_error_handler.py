@@ -86,6 +86,92 @@ FATAL_ERROR_PATTERNS = {
     },
 }
 
+# =============================================================================
+# RETRYABLE ERROR PATTERNS
+# =============================================================================
+# These errors indicate transient failures that may succeed on retry.
+# Tasks matching these patterns should be requeued (up to max_attempts) rather
+# than permanently marked as Failed.
+
+RETRYABLE_ERROR_PATTERNS = {
+    "oom": {
+        "patterns": [
+            r"CUDA out of memory",
+            r"torch\.OutOfMemoryError",
+            r"Tried to allocate.*MiB",
+            r"CUDA error: out of memory",
+            r"CUDA error: too many resources requested",
+        ],
+        "max_attempts": 3,
+        "description": "GPU memory exhaustion - may succeed on different worker or after memory clears",
+    },
+    "generation_no_output": {
+        "patterns": [
+            r"No output generated",
+            r"Generation produced no output",
+        ],
+        "max_attempts": 2,
+        "description": "Generation completed but produced no output - often transient",
+    },
+    "edge_function_transient": {
+        "patterns": [
+            r"\[EDGE_FAIL:.*:HTTP_500\]",
+            r"\[EDGE_FAIL:.*:5XX_TRANSIENT\]",
+            r"\[EDGE_FAIL:.*:TIMEOUT\]",
+            r"\[EDGE_FAIL:.*:NETWORK\]",
+            r"WORKER_ERROR.*Function exited due to an error",
+        ],
+        "max_attempts": 3,
+        "description": "Edge function failures - often CDN issues or cold starts",
+    },
+    "network_transient": {
+        "patterns": [
+            r"ConnectionError",
+            r"Connection reset by peer",
+            r"Connection refused",
+            r"Network is unreachable",
+            r"timed out",
+        ],
+        "max_attempts": 3,
+        "description": "Network connectivity issues - usually resolve on retry",
+    },
+}
+
+# Default max attempts if category doesn't specify
+DEFAULT_MAX_ATTEMPTS = 2
+
+
+def is_retryable_error(error_message: str) -> tuple[bool, str | None, int]:
+    """
+    Determine if an error is retryable and the task should be requeued.
+    
+    Args:
+        error_message: String representation of the error
+    
+    Returns:
+        Tuple of (is_retryable: bool, category: str | None, max_attempts: int)
+    """
+    if not error_message:
+        return False, None, 0
+    
+    error_str = str(error_message)
+    
+    # Check against all retryable error patterns
+    for category, config in RETRYABLE_ERROR_PATTERNS.items():
+        patterns = config["patterns"]
+        max_attempts = config.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        
+        for pattern in patterns:
+            if re.search(pattern, error_str, re.IGNORECASE):
+                return True, category, max_attempts
+    
+    return False, None, 0
+
+
+# =============================================================================
+# FATAL ERROR TRACKING
+# =============================================================================
+
 # Global counter for tracking consecutive fatal errors (reset on successful task)
 _consecutive_fatal_errors = 0
 _last_fatal_category = None
