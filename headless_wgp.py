@@ -809,7 +809,7 @@ class WanOrchestrator:
             generation_logger.info(f"[UNI3C_CACHE] Loading Uni3C controlnet from disk (first use)...")
 
             state_dict, config = load_uni3c_checkpoint(ckpts_dir=ckpts_dir)
-            controlnet = WanControlNet(**config)
+            controlnet = WanControlNet(config)
             controlnet.load_state_dict(state_dict, strict=False)
             controlnet = controlnet.to(torch.float16)
             controlnet.eval()

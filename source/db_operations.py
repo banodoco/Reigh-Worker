@@ -2161,7 +2161,7 @@ def reset_generation_started_at(task_id_str: str) -> bool:
         "reset_generation_started_at": True
     }
 
-    dprint(f"[BILLING] Resetting generation_started_at for task {task_id_str} (model loading complete)")
+    print(f"[BILLING] Resetting generation_started_at for task {task_id_str} (model loading complete)")
 
     resp, edge_error = _call_edge_function_with_retry(
         edge_url=edge_url,
@@ -2174,7 +2174,7 @@ def reset_generation_started_at(task_id_str: str) -> bool:
     )
 
     if resp and resp.status_code == 200:
-        dprint(f"[BILLING] Successfully reset generation_started_at for task {task_id_str}")
+        print(f"[BILLING] ✅ Successfully reset generation_started_at for task {task_id_str}")
         return True
     elif edge_error:
         print(f"[ERROR] Failed to reset generation_started_at for task {task_id_str}: {edge_error}")
