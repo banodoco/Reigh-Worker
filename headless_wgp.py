@@ -818,6 +818,7 @@ class WanOrchestrator:
                 dtype=torch.float16,
                 use_cache=False  # We manage our own cache
             )
+            controlnet.eval()  # Ensure inference mode
 
             # Cache for future generations
             self._cached_uni3c_controlnet = controlnet
