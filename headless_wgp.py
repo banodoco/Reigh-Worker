@@ -802,17 +802,22 @@ class WanOrchestrator:
             import torch
             import os
 
-            # Use the same loading logic as any2video.py
-            from models.wan.uni3c import load_uni3c_checkpoint, WanControlNet
+            # Use the proper loading function that handles dtypes correctly
+            from models.wan.uni3c import load_uni3c_controlnet
 
             ckpts_dir = os.path.join(self.wan_root, "ckpts")
             generation_logger.info(f"[UNI3C_CACHE] Loading Uni3C controlnet from disk (first use)...")
 
-            state_dict, config = load_uni3c_checkpoint(ckpts_dir=ckpts_dir)
-            controlnet = WanControlNet(config)
-            controlnet.load_state_dict(state_dict, strict=False)
-            controlnet = controlnet.to(torch.float16)
-            controlnet.eval()
+            # load_uni3c_controlnet handles:
+            # - base_dtype attribute setting
+            # - per-layer dtype control (patch embeddings stay float32)
+            # - proper model initialization
+            controlnet = load_uni3c_controlnet(
+                ckpts_dir=ckpts_dir,
+                device="cuda",
+                dtype=torch.float16,
+                use_cache=False  # We manage our own cache
+            )
 
             # Cache for future generations
             self._cached_uni3c_controlnet = controlnet
