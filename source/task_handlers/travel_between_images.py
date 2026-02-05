@@ -1838,6 +1838,9 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 "segment_index": idx,
                 "is_first_segment": (idx == 0),
                 "is_last_segment": (idx == num_segments - 1),
+                # Standardized fields for completion handler
+                "child_order": idx,
+                "is_single_item": (num_segments == 1),
 
                 "current_run_base_output_dir": str(current_run_output_dir.resolve()), # Base for segment's own output folder creation
 
