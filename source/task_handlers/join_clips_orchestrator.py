@@ -781,6 +781,8 @@ def _create_join_chain_tasks(
             "is_last_join": (idx == num_joins - 1),
             # Standardized field for completion handler
             "child_order": idx,
+            # Skip generation creation - final_stitch handles the parent variant
+            "skip_generation": True,
 
             # First join has explicit starting path, rest fetch from dependency
             "starting_video_path": clip_start.get("url") if idx == 0 else None,
@@ -889,6 +891,8 @@ def _create_parallel_join_tasks(
             "is_last_join": False,    # Not relevant for transition_only
             # Standardized field for completion handler
             "child_order": idx,
+            # Skip generation creation - final_stitch handles the parent variant
+            "skip_generation": True,
 
             # Both clips are explicit (no dependency fetch)
             "starting_video_path": clip_start.get("url"),
