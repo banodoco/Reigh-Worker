@@ -277,6 +277,10 @@ def main():
         db_ops.SUPABASE_ACCESS_TOKEN = access_token
         db_ops.debug_mode = debug_mode
 
+        # Propagate to os.environ for code that can't import db_operations
+        # (fatal_error_handler during crashes, headless_wgp notify_model_switch)
+        os.environ["SUPABASE_URL"] = cli_args.supabase_url
+
     except Exception as e:
         headless_logger.critical(f"Supabase init failed: {e}")
         sys.exit(1)

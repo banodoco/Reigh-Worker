@@ -121,8 +121,9 @@ def _notify_worker_model_switch(old_model: Optional[str], new_model: str):
     try:
         import httpx
         
+        supabase_url = os.getenv("SUPABASE_URL", "https://wczysqzxlwdndgxitrvc.supabase.co")
         response = httpx.post(
-            "https://wczysqzxlwdndgxitrvc.supabase.co/functions/v1/update-worker-model",
+            f"{supabase_url.rstrip('/')}/functions/v1/update-worker-model",
             headers={
                 "Authorization": f"Bearer {supabase_key}",
                 "Content-Type": "application/json"

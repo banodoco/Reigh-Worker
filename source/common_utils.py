@@ -1919,13 +1919,14 @@ def upload_intermediate_file_to_storage(
     RETRYABLE_STATUS_CODES = {502, 503, 504}
     MAX_RETRIES = 3
     
-    # Check if Supabase is configured
-    SUPABASE_URL = os.environ.get("SUPABASE_URL")
+    # Check if Supabase is configured (read URL from db_operations — canonical source set by worker.py)
+    from source import db_operations as _db_ops
+    SUPABASE_URL = _db_ops.SUPABASE_URL
     SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
-    
+
     if not SUPABASE_URL or not SUPABASE_KEY:
-        dprint(f"[UPLOAD_INTERMEDIATE] Supabase not configured, returning local path")
-        return str(local_file_path.resolve())
+        dprint(f"[UPLOAD_INTERMEDIATE] Supabase not configured, cannot upload")
+        return None
     
     if not local_file_path.exists():
         dprint(f"[UPLOAD_INTERMEDIATE] File not found: {local_file_path}")
