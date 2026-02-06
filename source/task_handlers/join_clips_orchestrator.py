@@ -827,6 +827,7 @@ def _create_parallel_join_tasks(
     orchestrator_task_id_str: str,
     orchestrator_project_id: str | None,
     orchestrator_payload: dict,
+    parent_generation_id: str | None,
     dprint
 ) -> Tuple[bool, str]:
     """
@@ -939,6 +940,8 @@ def _create_parallel_join_tasks(
         "orchestrator_task_id_ref": orchestrator_task_id_str,
         "orchestrator_run_id": run_id,
         "project_id": orchestrator_project_id,
+        # Parent generation ID for linking to shot_generations (variant creation)
+        "parent_generation_id": parent_generation_id,
 
         # Original clips (for trimming and stitching)
         "clip_list": clip_list,
@@ -1241,6 +1244,11 @@ def _handle_join_clips_orchestrator_task(
 
         if use_parallel:
             dprint(f"[JOIN_ORCHESTRATOR] Using PARALLEL pattern (transitions in parallel + final stitch)")
+            # Get parent_generation_id from top-level task params or orchestrator_details
+            parent_generation_id = (
+                task_params_from_db.get("parent_generation_id")
+                or orchestrator_payload.get("parent_generation_id")
+            )
             success, message = _create_parallel_join_tasks(
                 clip_list=clip_list,
                 run_id=run_id,
@@ -1251,6 +1259,7 @@ def _handle_join_clips_orchestrator_task(
                 orchestrator_task_id_str=orchestrator_task_id_str,
                 orchestrator_project_id=orchestrator_project_id,
                 orchestrator_payload=orchestrator_payload,
+                parent_generation_id=parent_generation_id,
                 dprint=dprint
             )
         else:
