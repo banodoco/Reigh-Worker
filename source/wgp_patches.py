@@ -179,6 +179,110 @@ def apply_qwen_inpainting_lora_patch() -> bool:
         return False
 
 
+def apply_lora_key_tolerance_patch(wgp_module: "types.ModuleType") -> bool:
+    """
+    Patch LoRA loading to tolerate non-standard keys (e.g., lightx2v format).
+
+    Why: Some LoRA files (like lightx2v/Wan2.2-Distill-Loras) contain keys in
+    non-standard formats (diff_m, norm_k_img) that mmgp rejects as hard errors.
+    ComfyUI's loader silently skips these unrecognized keys. This patch wraps
+    the LoRA preprocessor to strip unrecognized keys before mmgp's validator
+    sees them, matching ComfyUI's behavior.
+
+    How: Monkeypatches wgp.get_loras_preprocessor to wrap the returned
+    preprocessor with a key-stripping step that:
+    1. Removes keys with no recognized LoRA suffix (handles diff_m, etc.)
+    2. Removes keys whose module path doesn't exist in the model (handles
+       norm_k_img and similar non-standard module references)
+
+    Args:
+        wgp_module: The imported wgp module
+
+    Returns:
+        True if patch was applied successfully, False otherwise
+    """
+    try:
+        _orig_get_loras_preprocessor = wgp_module.get_loras_preprocessor
+
+        # Valid LoRA key suffixes that mmgp's validator recognizes
+        # Order: longest first to avoid partial matches
+        VALID_LORA_SUFFIXES = [
+            '.lora_down.weight',
+            '.lora_up.weight',
+            '.lora_A.weight',
+            '.lora_B.weight',
+            '.dora_scale',
+            '.diff_b',
+            '.diff',
+        ]
+        KNOWN_PREFIXES = ("diffusion_model.", "transformer.")
+
+        def _patched_get_loras_preprocessor(transformer, model_type):
+            orig_preproc = _orig_get_loras_preprocessor(transformer, model_type)
+
+            # Build set of known module names for unexpected-key detection
+            modules_set = set(name for name, _ in transformer.named_modules())
+
+            def _tolerant_preprocessor(sd):
+                # Run original preprocessor first (if any)
+                if orig_preproc is not None:
+                    sd = orig_preproc(sd)
+
+                # Detect prefix from first key (same logic as mmgp)
+                first_key = next(iter(sd), None)
+                if first_key is None:
+                    return sd
+
+                pos = first_key.find(".")
+                prefix = first_key[:pos + 1] if pos > 0 else ""
+                if prefix not in KNOWN_PREFIXES:
+                    prefix = ""
+
+                keys_to_remove = []
+                for k in sd:
+                    # Skip alpha keys (handled separately by mmgp before validation)
+                    if k.endswith('.alpha'):
+                        continue
+
+                    # Find matching suffix and extract module name
+                    module_name = None
+                    for suffix in VALID_LORA_SUFFIXES:
+                        if k.endswith(suffix):
+                            raw_module = k[:-len(suffix)]
+                            if prefix and raw_module.startswith(prefix):
+                                module_name = raw_module[len(prefix):]
+                            else:
+                                module_name = raw_module
+                            break
+
+                    if module_name is None:
+                        # No valid LoRA suffix found - would be invalid_keys in mmgp
+                        keys_to_remove.append(k)
+                        continue
+
+                    # Check if module exists in model - would be unexpected_keys in mmgp
+                    if module_name not in modules_set:
+                        keys_to_remove.append(k)
+                        continue
+
+                if keys_to_remove:
+                    print(f"[LORA_TOLERANCE] Stripping {len(keys_to_remove)} non-standard/incompatible keys from LoRA: "
+                          f"{keys_to_remove[:5]}{'...' if len(keys_to_remove) > 5 else ''}")
+                    for k in keys_to_remove:
+                        del sd[k]
+
+                return sd
+
+            return _tolerant_preprocessor
+
+        wgp_module.get_loras_preprocessor = _patched_get_loras_preprocessor
+        return True
+
+    except Exception as e:
+        model_logger.debug(f"[LORA_TOLERANCE] Failed to apply LoRA key tolerance patch: {e}")
+        return False
+
+
 def apply_all_wgp_patches(wgp_module: "types.ModuleType", wan_root: str) -> dict:
     """
     Apply all WGP patches for headless operation.
@@ -196,6 +300,7 @@ def apply_all_wgp_patches(wgp_module: "types.ModuleType", wan_root: str) -> dict
     results["qwen_lora_directory"] = apply_qwen_lora_directory_patch(wgp_module, wan_root)
     results["lora_multiplier_parser"] = apply_lora_multiplier_parser_patch(wgp_module)
     results["qwen_inpainting_lora"] = apply_qwen_inpainting_lora_patch()
+    results["lora_key_tolerance"] = apply_lora_key_tolerance_patch(wgp_module)
 
     # Log summary
     successful = [k for k, v in results.items() if v]
