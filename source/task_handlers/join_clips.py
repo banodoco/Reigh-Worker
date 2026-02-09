@@ -1529,6 +1529,33 @@ def _handle_join_final_stitch(
     dprint(f"[FINAL_STITCH] Task {task_id}: Starting final stitch handler")
 
     try:
+        # --- Chain Mode Passthrough ---
+        # When created by the chain pattern, the last join in the chain already produced
+        # the fully concatenated video. We just pass through its output (+ optional audio).
+        chain_mode = task_params_from_db.get("chain_mode", False)
+        if chain_mode:
+            dprint(f"[FINAL_STITCH] Task {task_id}: Chain mode — passthrough from last chain join")
+            transition_task_ids = task_params_from_db.get("transition_task_ids", [])
+            if not transition_task_ids:
+                return False, "chain_mode=True but no transition_task_ids (last chain join ID) provided"
+
+            # The single ID is the last join in the chain
+            last_join_id = transition_task_ids[0]
+            chain_output = db_ops.get_task_output_location_from_db(last_join_id)
+            if not chain_output:
+                return False, f"Failed to get output from chain join task {last_join_id}"
+
+            dprint(f"[FINAL_STITCH] Task {task_id}: Chain output from {last_join_id}: {chain_output[:100]}...")
+
+            # The chain join's output_location is the final video URL/path — use it directly
+            # If audio was requested, we'd need to mux it in, but for now just passthrough
+            audio_url = task_params_from_db.get("audio_url")
+            if audio_url:
+                dprint(f"[FINAL_STITCH] Task {task_id}: Audio requested but chain mode passthrough — audio will be from chain output")
+                # TODO: If audio overlay is needed on chain output, add muxing here
+
+            return True, chain_output
+
         # --- 1. Extract Parameters ---
         clip_list = task_params_from_db.get("clip_list", [])
         transition_task_ids = task_params_from_db.get("transition_task_ids", [])

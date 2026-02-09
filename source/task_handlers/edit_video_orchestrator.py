@@ -633,6 +633,10 @@ def _handle_edit_video_orchestrator_task(
                 vlm_enhanced_prompts = [None] * num_joins
         
         # === CREATE JOIN CHAIN (using shared core function) ===
+        parent_generation_id = (
+            task_params_from_db.get("parent_generation_id")
+            or orchestrator_payload.get("parent_generation_id")
+        )
         success, message = _create_join_chain_tasks(
             clip_list=clip_list,
             run_id=run_id,
@@ -643,6 +647,7 @@ def _handle_edit_video_orchestrator_task(
             orchestrator_task_id_str=orchestrator_task_id_str,
             orchestrator_project_id=orchestrator_project_id,
             orchestrator_payload=orchestrator_payload,
+            parent_generation_id=parent_generation_id,
             dprint=dprint
         )
         

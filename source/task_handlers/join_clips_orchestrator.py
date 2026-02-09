@@ -718,6 +718,7 @@ def _create_join_chain_tasks(
     orchestrator_task_id_str: str,
     orchestrator_project_id: str | None,
     orchestrator_payload: dict,
+    parent_generation_id: str | None,
     dprint
 ) -> Tuple[bool, str]:
     """
@@ -781,7 +782,7 @@ def _create_join_chain_tasks(
             "is_last_join": (idx == num_joins - 1),
             # Standardized field for completion handler
             "child_order": idx,
-            # Skip generation creation - final_stitch handles the parent variant
+            # Always skip generation on segments — join_final_stitch handles variant creation
             "skip_generation": True,
 
             # First join has explicit starting path, rest fetch from dependency
@@ -822,7 +823,58 @@ def _create_join_chain_tasks(
         previous_join_task_id = actual_db_row_id
         joins_created += 1
 
-    return True, f"Successfully enqueued {joins_created} join tasks for run {run_id}"
+    # === Create join_final_stitch that depends on the last join ===
+    # This ensures ALL join clips (regardless of segment count) go through the same
+    # completion routing: final_stitch completes → generation created → orchestrator done.
+    # For single joins this is effectively a passthrough; for multi-joins it wraps the
+    # last chain output. Either way, no special-case parent update logic is needed.
+    context_frame_count = join_settings.get("context_frame_count", 8)
+
+    final_stitch_payload = {
+        "orchestrator_task_id_ref": orchestrator_task_id_str,
+        "orchestrator_run_id": run_id,
+        "project_id": orchestrator_project_id,
+        "parent_generation_id": parent_generation_id,
+
+        # Original clips (for context in final output)
+        "clip_list": clip_list,
+
+        # The chain's last join task ID — final_stitch fetches output from this
+        "transition_task_ids": [previous_join_task_id],
+
+        # Chain mode flag: final_stitch can use the last join's output directly
+        # instead of re-stitching from individual transitions
+        "chain_mode": True,
+
+        # Blending parameters
+        "blend_frames": min(context_frame_count, 15),
+        "fps": join_settings.get("fps") or orchestrator_payload.get("fps", 16),
+
+        # Audio (if provided)
+        "audio_url": orchestrator_payload.get("audio_url"),
+
+        # Output configuration
+        "current_run_base_output_dir": str(current_run_output_dir.resolve()),
+    }
+
+    # === CANCELLATION CHECK: Abort before final stitch if orchestrator was cancelled ===
+    orchestrator_current_status = db_ops.get_task_current_status(orchestrator_task_id_str)
+    if orchestrator_current_status and orchestrator_current_status.lower() in ('cancelled', 'canceled'):
+        dprint(f"[CANCELLATION] Join orchestrator {orchestrator_task_id_str} was cancelled - aborting before final stitch creation")
+        print(f"[JOIN_ORCHESTRATOR] Orchestrator cancelled, cancelling {joins_created} join tasks")
+        db_ops.cancel_orchestrator_children(orchestrator_task_id_str, reason="Orchestrator cancelled by user")
+        return False, f"Orchestrator cancelled before final stitch could be created ({joins_created} joins have been cancelled)"
+
+    final_stitch_task_id = db_ops.add_task_to_db(
+        task_payload=final_stitch_payload,
+        task_type_str="join_final_stitch",
+        dependant_on=previous_join_task_id  # Depends on last join in the chain
+    )
+
+    dprint(f"[JOIN_CORE] Final stitch task created with DB ID: {final_stitch_task_id}")
+    dprint(f"[JOIN_CORE] Complete: {joins_created} chain joins + 1 final stitch = {joins_created + 1} total tasks")
+
+    return True, f"Successfully enqueued {joins_created} chain joins + 1 final stitch for run {run_id}"
 
 
 def _create_parallel_join_tasks(
@@ -1266,13 +1318,14 @@ def _handle_join_clips_orchestrator_task(
         # Choose between parallel pattern (new, better quality) and chain pattern (legacy)
         use_parallel = orchestrator_payload.get("use_parallel_joins", True)  # Default to parallel
 
+        # Get parent_generation_id for variant creation (used by final_stitch in both patterns)
+        parent_generation_id = (
+            task_params_from_db.get("parent_generation_id")
+            or orchestrator_payload.get("parent_generation_id")
+        )
+
         if use_parallel:
             dprint(f"[JOIN_ORCHESTRATOR] Using PARALLEL pattern (transitions in parallel + final stitch)")
-            # Get parent_generation_id from top-level task params or orchestrator_details
-            parent_generation_id = (
-                task_params_from_db.get("parent_generation_id")
-                or orchestrator_payload.get("parent_generation_id")
-            )
             success, message = _create_parallel_join_tasks(
                 clip_list=clip_list,
                 run_id=run_id,
@@ -1298,6 +1351,7 @@ def _handle_join_clips_orchestrator_task(
                 orchestrator_task_id_str=orchestrator_task_id_str,
                 orchestrator_project_id=orchestrator_project_id,
                 orchestrator_payload=orchestrator_payload,
+                parent_generation_id=parent_generation_id,
                 dprint=dprint
             )
 
