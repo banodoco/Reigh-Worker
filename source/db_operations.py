@@ -1865,6 +1865,111 @@ def get_orchestrator_child_tasks(orchestrator_task_id: str) -> dict:
         traceback.print_exc()
         return empty_result
 
+def get_task_current_status(task_id: str) -> str | None:
+    """
+    Lightweight status lookup for a single task via the get-task-status edge function.
+    Used by orchestrator handlers to detect cancellation before creating child tasks.
+    
+    Returns the status string (e.g. "Queued", "In Progress", "Cancelled") or None on error.
+    """
+    # Build edge function URL
+    edge_url = (
+        os.getenv("SUPABASE_EDGE_GET_TASK_STATUS_URL")
+        or (f"{SUPABASE_URL.rstrip('/')}/functions/v1/get-task-status" if SUPABASE_URL else None)
+    )
+
+    # Try edge function first (works for local workers without service key)
+    if edge_url and SUPABASE_ACCESS_TOKEN:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"
+        }
+        payload = {"task_id": task_id}
+
+        try:
+            resp, edge_error = _call_edge_function_with_retry(
+                edge_url=edge_url,
+                payload=payload,
+                headers=headers,
+                function_name="get-task-status",
+                context_id=task_id,
+                timeout=15,
+                max_retries=2,
+                method="POST",
+            )
+
+            if resp and resp.status_code == 200:
+                data = resp.json()
+                return data.get("status")
+            elif edge_error:
+                dprint(f"[GET_TASK_STATUS] Edge function failed for {task_id}: {edge_error}")
+        except Exception as e:
+            dprint(f"[GET_TASK_STATUS] Error calling get-task-status for {task_id}: {e}")
+
+    # Fallback to direct query if edge function not available or failed
+    if SUPABASE_CLIENT:
+        try:
+            resp = SUPABASE_CLIENT.table(PG_TABLE_NAME).select("status").eq("id", task_id).single().execute()
+            if resp.data:
+                return resp.data.get("status")
+        except Exception as e:
+            dprint(f"[GET_TASK_STATUS] Direct query failed for {task_id}: {e}")
+
+    return None
+
+
+def cancel_orchestrator_children(orchestrator_task_id: str, reason: str = "Orchestrator cancelled") -> int:
+    """
+    Cancel all non-terminal child tasks of an orchestrator.
+    
+    Fetches all children via get_orchestrator_child_tasks(), then sets any that are
+    still in a non-terminal state (Queued, In Progress) to "Cancelled" via update-task-status.
+    
+    Args:
+        orchestrator_task_id: The orchestrator task ID whose children should be cancelled.
+        reason: Human-readable reason stored in output_location.
+    
+    Returns:
+        Number of child tasks that were cancelled.
+    """
+    TERMINAL_STATUSES = {'complete', 'failed', 'cancelled', 'canceled', 'error'}
+    
+    child_tasks = get_orchestrator_child_tasks(orchestrator_task_id)
+    
+    # Flatten all child task categories into a single list
+    all_children = []
+    for category in child_tasks.values():
+        if isinstance(category, list):
+            all_children.extend(category)
+    
+    if not all_children:
+        dprint(f"[CANCEL_CHILDREN] No child tasks found for orchestrator {orchestrator_task_id}")
+        return 0
+    
+    cancelled_count = 0
+    for child in all_children:
+        child_id = child.get('id')
+        child_status = (child.get('status') or '').lower()
+        
+        if child_status in TERMINAL_STATUSES:
+            dprint(f"[CANCEL_CHILDREN] Skipping child {child_id} (already {child_status})")
+            continue
+        
+        dprint(f"[CANCEL_CHILDREN] Cancelling child task {child_id} (was {child_status})")
+        try:
+            update_task_status(child_id, "Cancelled", output_location=reason)
+            cancelled_count += 1
+        except Exception as e:
+            print(f"[ERROR][CANCEL_CHILDREN] Failed to cancel child {child_id}: {e}")
+    
+    if cancelled_count > 0:
+        print(f"[CANCEL_CHILDREN] Cancelled {cancelled_count}/{len(all_children)} child tasks for orchestrator {orchestrator_task_id}")
+    else:
+        dprint(f"[CANCEL_CHILDREN] All {len(all_children)} children already in terminal state for orchestrator {orchestrator_task_id}")
+    
+    return cancelled_count
+
+
 def cleanup_duplicate_child_tasks(orchestrator_task_id: str, expected_segments: int) -> dict:
     """
     Detects and removes duplicate child tasks for an orchestrator.

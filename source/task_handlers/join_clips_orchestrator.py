@@ -799,6 +799,14 @@ def _create_join_chain_tasks(
             "full_orchestrator_payload": orchestrator_payload,
         }
 
+        # === CANCELLATION CHECK: Abort if orchestrator was cancelled ===
+        orchestrator_current_status = db_ops.get_task_current_status(orchestrator_task_id_str)
+        if orchestrator_current_status and orchestrator_current_status.lower() in ('cancelled', 'canceled'):
+            dprint(f"[CANCELLATION] Join orchestrator {orchestrator_task_id_str} was cancelled - aborting join creation at index {idx}")
+            print(f"[JOIN_ORCHESTRATOR] Orchestrator cancelled, stopping join task creation at join {idx}")
+            db_ops.cancel_orchestrator_children(orchestrator_task_id_str, reason="Orchestrator cancelled by user")
+            return False, f"Orchestrator cancelled before join {idx} could be created ({joins_created} joins were already created and have been cancelled)"
+
         dprint(f"[JOIN_CORE] Submitting join {idx} to database, depends_on={previous_join_task_id}")
 
         # Create task with dependency chain
@@ -913,6 +921,14 @@ def _create_parallel_join_tasks(
             "full_orchestrator_payload": orchestrator_payload,
         }
 
+        # === CANCELLATION CHECK: Abort if orchestrator was cancelled ===
+        orchestrator_current_status = db_ops.get_task_current_status(orchestrator_task_id_str)
+        if orchestrator_current_status and orchestrator_current_status.lower() in ('cancelled', 'canceled'):
+            dprint(f"[CANCELLATION] Join orchestrator {orchestrator_task_id_str} was cancelled - aborting transition creation at index {idx}")
+            print(f"[JOIN_ORCHESTRATOR] Orchestrator cancelled, stopping transition task creation at transition {idx}")
+            db_ops.cancel_orchestrator_children(orchestrator_task_id_str, reason="Orchestrator cancelled by user")
+            return False, f"Orchestrator cancelled before transition {idx} could be created ({len(transition_task_ids)} transitions were already created and have been cancelled)"
+
         dprint(f"[JOIN_PARALLEL] Submitting transition {idx} to database (no dependency)")
 
         # Create task WITHOUT dependency - all transitions run in parallel
@@ -959,6 +975,14 @@ def _create_parallel_join_tasks(
         # Output configuration
         "current_run_base_output_dir": str(current_run_output_dir.resolve()),
     }
+
+    # === CANCELLATION CHECK: Abort before final stitch if orchestrator was cancelled ===
+    orchestrator_current_status = db_ops.get_task_current_status(orchestrator_task_id_str)
+    if orchestrator_current_status and orchestrator_current_status.lower() in ('cancelled', 'canceled'):
+        dprint(f"[CANCELLATION] Join orchestrator {orchestrator_task_id_str} was cancelled - aborting before final stitch creation")
+        print(f"[JOIN_ORCHESTRATOR] Orchestrator cancelled, cancelling {len(transition_task_ids)} transition tasks")
+        db_ops.cancel_orchestrator_children(orchestrator_task_id_str, reason="Orchestrator cancelled by user")
+        return False, f"Orchestrator cancelled before final stitch could be created ({len(transition_task_ids)} transitions have been cancelled)"
 
     # Create final stitch task with multi-dependency (all transitions must complete)
     final_stitch_task_id = db_ops.add_task_to_db(

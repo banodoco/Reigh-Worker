@@ -2013,6 +2013,15 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
             dprint(f"[ORCHESTRATOR_DEBUG] {orchestrator_task_id_str}: SEGMENT {idx} PAYLOAD CREATED")
             dprint(f"[DEEP_DEBUG] Segment payload keys: {list(segment_payload.keys())}")
 
+            # === CANCELLATION CHECK: Abort if orchestrator was cancelled ===
+            orchestrator_current_status = db_ops.get_task_current_status(orchestrator_task_id_str)
+            if orchestrator_current_status and orchestrator_current_status.lower() in ('cancelled', 'canceled'):
+                dprint(f"[CANCELLATION] Orchestrator {orchestrator_task_id_str} was cancelled - aborting segment creation at index {idx}")
+                print(f"[ORCHESTRATOR] Orchestrator cancelled, stopping segment creation at segment {idx}")
+                # Cancel any child tasks that were already created in earlier iterations
+                db_ops.cancel_orchestrator_children(orchestrator_task_id_str, reason="Orchestrator cancelled by user")
+                return False, f"Orchestrator cancelled before segment {idx} could be created ({segments_created} segments were already created and have been cancelled)"
+
             dprint(f"[DEBUG_DEPENDENCY_CHAIN] Creating new segment {idx}, depends_on (prev idx {idx-1}): {previous_segment_task_id}")
             print(f"[ORCHESTRATOR] Creating segment {idx} task...")
             actual_db_row_id = db_ops.add_task_to_db(
