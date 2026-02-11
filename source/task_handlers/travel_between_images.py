@@ -363,9 +363,11 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
         # In those cases, the orchestrator should be considered complete once all segments complete.
         travel_mode = orchestrator_payload.get("model_type", "vace")
         use_svi = bool(orchestrator_payload.get("use_svi", False))
+        use_ltx2 = bool(orchestrator_payload.get("use_ltx2", False))
         chain_segments = bool(orchestrator_payload.get("chain_segments", True))
         should_create_stitch = bool(
-            use_svi
+            use_ltx2
+            or use_svi
             or (travel_mode == "vace" and chain_segments)
         )
         required_stitch_count = 1 if should_create_stitch else 0
@@ -1665,13 +1667,19 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
             travel_mode = orchestrator_payload.get("model_type", "vace")
             chain_segments = orchestrator_payload.get("chain_segments", True)
             use_svi = orchestrator_payload.get("use_svi", False)
+            use_ltx2 = orchestrator_payload.get("use_ltx2", False)
 
             # Determine dependency strictly from previously resolved actual DB IDs
             # SVI MODE: Sequential segments (each depends on previous for end frame chaining)
+            # LTX-2 MODE: Sequential segments (native keyframe anchoring, no SVI LoRAs needed)
             # I2V MODE (non-SVI): Independent segments (no dependency on previous task)
             # VACE MODE: Sequential by default (chain_segments=True), independent if chain_segments=False
 
-            if use_svi:
+            if use_ltx2:
+                # LTX-2 mode: ALWAYS sequential - each segment needs previous output for end frame
+                previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
+                dprint(f"[DEBUG_DEPENDENCY_CHAIN] Segment {idx} (LTX-2 mode): Sequential dependency on previous segment: {previous_segment_task_id}")
+            elif use_svi:
                 # SVI mode: ALWAYS sequential - each segment needs previous output for start frame
                 previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
                 dprint(f"[DEBUG_DEPENDENCY_CHAIN] Segment {idx} (SVI mode): Sequential dependency on previous segment: {previous_segment_task_id}")
@@ -1685,8 +1693,8 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 # VACE MODE (Sequential): Dependent on previous segment
                 previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
 
-            # Defensive fallback for sequential modes (SVI or VACE with chaining)
-            if (use_svi or (travel_mode == "vace" and chain_segments)):
+            # Defensive fallback for sequential modes (SVI, LTX-2, or VACE with chaining)
+            if (use_ltx2 or use_svi or (travel_mode == "vace" and chain_segments)):
                 if idx > 0 and not previous_segment_task_id:
                     fallback_prev = existing_segment_task_ids.get(idx - 1)
                     if fallback_prev:
@@ -1853,7 +1861,7 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 "vace_image_refs_to_prepare_by_worker": vace_refs_for_this_segment, # Already filtered for this segment
 
                 "parsed_resolution_wh": orchestrator_payload["parsed_resolution_wh"],
-                "model_name": orchestrator_payload["model_name"],
+                "model_name": "ltx2_19B" if use_ltx2 else orchestrator_payload["model_name"],
                 "seed_to_use": orchestrator_payload.get("seed_base", 12345),
                 "cfg_star_switch": orchestrator_payload.get("cfg_star_switch", 0),
                 "cfg_zero_step": orchestrator_payload.get("cfg_zero_step", -1),
@@ -1876,6 +1884,8 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 
                 # SVI (Stable Video Infinity) end frame chaining
                 "use_svi": use_svi,
+                # LTX-2 native keyframe anchoring mode
+                "use_ltx2": use_ltx2,
             }
 
             # =============================================================================
@@ -2004,7 +2014,49 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 segment_payload["use_svi"] = False
                 segment_payload["svi2pro"] = False
                 dprint(f"[SVI_CONFIG] Segment {idx}: First segment - SVI disabled (use_svi=False, svi2pro=False)")
-            
+
+            # =============================================================================
+            # LTX-2 Native Keyframe Anchoring Configuration
+            # =============================================================================
+            # LTX-2 uses native image_start / image_end conditioning instead of SVI LoRAs.
+            # Each segment gets its pair of input images as keyframe anchors.
+            if use_ltx2:
+                input_images = orchestrator_payload.get("input_image_paths_resolved", [])
+                ltx2_start_img = input_images[idx] if idx < len(input_images) else None
+                ltx2_end_img = input_images[idx + 1] if (idx + 1) < len(input_images) else None
+
+                # Determine image_prompt_type based on available anchors
+                if ltx2_start_img and ltx2_end_img:
+                    ltx2_prompt_type = "TSE"
+                elif ltx2_start_img:
+                    ltx2_prompt_type = "TS"
+                elif ltx2_end_img:
+                    ltx2_prompt_type = "TE"
+                else:
+                    ltx2_prompt_type = "T"
+
+                segment_payload["image_start"] = ltx2_start_img
+                segment_payload["image_end"] = ltx2_end_img
+                segment_payload["image_prompt_type"] = ltx2_prompt_type
+                segment_payload["audio_scale"] = orchestrator_payload.get("audio_scale", 1.0)
+
+                # Pass audio input if provided at orchestrator level
+                audio_path = orchestrator_payload.get("audio_input")
+                if audio_path:
+                    segment_payload["audio_input"] = audio_path
+
+                # LTX-2 does NOT use SVI LoRAs or SVI-specific parameters
+                segment_payload["use_svi"] = False
+                segment_payload["svi2pro"] = False
+
+                dprint(
+                    f"[LTX2_CONFIG] Segment {idx}: "
+                    f"image_prompt_type={ltx2_prompt_type}, "
+                    f"start={'set' if ltx2_start_img else 'none'}, "
+                    f"end={'set' if ltx2_end_img else 'none'}, "
+                    f"audio={'set' if audio_path else 'none'}"
+                )
+
             # Log LoRA configuration for debugging
             if segment_payload.get("lora_names"):
                 dprint(f"Orchestrator: Segment {idx} has {len(segment_payload['lora_names'])} LoRAs: {segment_payload['lora_names']}")
@@ -2049,7 +2101,12 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
         
         # Determine if we should create a stitch task
         should_create_stitch = False
-        if use_svi:
+        if use_ltx2:
+            # LTX-2 mode: Always create stitch task (segments are sequential with keyframe anchoring)
+            should_create_stitch = True
+            stitch_overlap_settings = [SVI_STITCH_OVERLAP] * (num_segments - 1) if num_segments > 1 else []
+            dprint(f"[STITCHING] LTX-2 mode: Creating stitch task with overlap={SVI_STITCH_OVERLAP}")
+        elif use_svi:
             # SVI mode: Always create stitch task (segments are sequential with end frame chaining)
             should_create_stitch = True
             # For SVI, use the small overlap value
@@ -2061,7 +2118,7 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
             stitch_overlap_settings = expanded_frame_overlap
             dprint(f"[STITCHING] VACE sequential mode: Creating stitch task with overlaps={expanded_frame_overlap}")
         else:
-            dprint(f"[STITCHING] Skipping stitch task creation (mode={travel_mode}, chain_segments={chain_segments}, use_svi={use_svi})")
+            dprint(f"[STITCHING] Skipping stitch task creation (mode={travel_mode}, chain_segments={chain_segments}, use_svi={use_svi}, use_ltx2={use_ltx2})")
         
         if should_create_stitch and not stitch_already_exists:
             final_stitched_video_name = f"travel_final_stitched_{run_id}.mp4"
@@ -2098,6 +2155,7 @@ def _handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_
                 "poll_timeout_from_orchestrator": orchestrator_payload.get("original_common_args", {}).get("poll_timeout", 1800),
                 "orchestrator_details": orchestrator_payload,  # Canonical name
                 "use_svi": use_svi,  # Pass SVI flag to stitch task
+                "use_ltx2": use_ltx2,  # Pass LTX-2 flag to stitch task
             }
             
             # Stitch should depend on the last segment's actual DB row ID

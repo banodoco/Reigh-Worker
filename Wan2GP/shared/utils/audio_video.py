@@ -12,6 +12,8 @@ import torch
 from PIL import Image
 import os.path as osp
 import json
+import numpy as np
+import soundfile as sf
 
 def rand_name(length=8, suffix=''):
     name = binascii.b2a_hex(os.urandom(length)).decode('utf-8')
@@ -20,6 +22,83 @@ def rand_name(length=8, suffix=''):
             suffix = '.' + suffix
         name += suffix
     return name
+
+
+def _prepare_audio_array(audio_data):
+    if torch.is_tensor(audio_data):
+        audio_data = audio_data.detach().cpu().float().numpy()
+    else:
+        audio_data = np.asarray(audio_data, dtype=np.float32)
+    if audio_data.ndim == 2 and audio_data.shape[0] <= 8 and audio_data.shape[1] > audio_data.shape[0]:
+        audio_data = audio_data.T
+    return audio_data
+
+
+def write_wav_file(path, audio_data, sample_rate):
+    audio_array = _prepare_audio_array(audio_data)
+    sf.write(path, audio_array, int(sample_rate))
+    return path
+
+
+def _get_audio_codec_settings(codec_key):
+    if not codec_key:
+        codec_key = "wav"
+    codec_key = str(codec_key).lower()
+    if codec_key == "mp3":
+        codec_key = "mp3_192"
+    settings = {
+        "wav": {"ext": "wav", "format": "wav"},
+        "mp3_128": {"ext": "mp3", "format": "mp3", "bitrate": "128k"},
+        "mp3_192": {"ext": "mp3", "format": "mp3", "bitrate": "192k"},
+        "mp3_320": {"ext": "mp3", "format": "mp3", "bitrate": "320k"},
+    }
+    return settings.get(codec_key, settings["wav"])
+
+
+def get_audio_codec_extension(codec_key):
+    return _get_audio_codec_settings(codec_key)["ext"]
+
+
+def _run_ffmpeg_encode(input_path, output_path, codec, bitrate=None, sample_rate=None, drop_video=False):
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", input_path]
+    if drop_video:
+        cmd.append("-vn")
+    cmd += ["-c:a", codec]
+    if bitrate:
+        cmd += ["-b:a", bitrate]
+    if sample_rate:
+        cmd += ["-ar", str(int(sample_rate))]
+    cmd.append(output_path)
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def save_audio_file(path, audio_data, sample_rate, codec_key="wav"):
+    settings = _get_audio_codec_settings(codec_key)
+    ext = settings["ext"]
+    if not path.lower().endswith(f".{ext}"):
+        path = osp.splitext(path)[0] + f".{ext}"
+    if settings["format"] == "wav":
+        return write_wav_file(path, audio_data, sample_rate)
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="audio_")
+    os.close(fd)
+    try:
+        write_wav_file(tmp_path, audio_data, sample_rate)
+        _run_ffmpeg_encode(tmp_path, path, "libmp3lame", bitrate=settings.get("bitrate"), sample_rate=sample_rate)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return path
+
+
+def extract_audio_track_to_wav(video_path, output_path):
+    if not video_path:
+        return None
+    video_path = os.fspath(video_path)
+    import ffmpeg
+    ffmpeg.input(video_path).output(output_path, **{"map": "0:a:0", "acodec": "pcm_s16le"}).overwrite_output().run(quiet=True)
+    return output_path
 
 
 
@@ -263,27 +342,46 @@ def save_video(tensor,
     error = None
     for _ in range(retry):
         try:
-            if torch.is_tensor(tensor):
-                # Preprocess tensor
-                tensor = tensor.clamp(min(value_range), max(value_range))
-                tensor = torch.stack([
-                    torchvision.utils.make_grid(u, nrow=nrow, normalize=normalize, value_range=value_range)
-                    for u in tensor.unbind(2)
-                ], dim=1).permute(1, 2, 3, 0)
-                tensor = (tensor * 255).type(torch.uint8).cpu()
-                arrays = tensor.numpy()
-            else:
-                arrays = tensor
-
             # Write video (silence ffmpeg logs)
             writer = imageio.get_writer(cache_file, fps=fps, ffmpeg_log_level='error', **codec_params)
-            for frame in arrays:
-                writer.append_data(frame)
-        
-            writer.close()
+            try:
+                if torch.is_tensor(tensor):
+                    # Stream frames to avoid materializing the full video on CPU.
+                    if tensor.dtype == torch.uint8 and tensor.ndim == 5 and tensor.shape[0] == 1 and nrow == 1:
+                        frames = tensor[0].permute(1, 2, 3, 0)
+                        for frame in frames:
+                            writer.append_data(frame.cpu().numpy())
+                    else:
+                        if tensor.dtype == torch.uint8:
+                            tensor = tensor.float().div_(127.5).sub_(1.0)
+                        for u in tensor.unbind(2):
+                            u = u.clamp(min(value_range), max(value_range))
+                            grid = torchvision.utils.make_grid(
+                                u, nrow=nrow, normalize=normalize, value_range=value_range
+                            )
+                            frame = grid.mul(255).type(torch.uint8).permute(1, 2, 0).cpu().numpy()
+                            writer.append_data(frame)
+                elif isinstance(tensor, (list, tuple)) and tensor and torch.is_tensor(tensor[0]):
+                    for chunk in tensor:
+                        if chunk is None:
+                            continue
+                        if chunk.ndim == 4:
+                            if chunk.shape[-1] in (1, 3, 4):
+                                frames = chunk
+                            else:
+                                frames = chunk.permute(1, 2, 3, 0)
+                            for frame in frames:
+                                writer.append_data(frame.cpu().numpy())
+                        else:
+                            writer.append_data(chunk)
+                else:
+                    for frame in tensor:
+                        writer.append_data(frame)
+            finally:
+                writer.close()
 
             return cache_file
-            
+
         except Exception as e:
             error = e
             print(f"error saving {save_file}: {e}")
@@ -445,3 +543,4 @@ def read_image_metadata(image_path):
             return None
     except Exception as e:
         print(f"Error reading metadata: {e}"); return None
+
