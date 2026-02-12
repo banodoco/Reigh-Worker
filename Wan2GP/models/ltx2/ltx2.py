@@ -458,6 +458,13 @@ class LTX2:
                 device=self.device,
                 models=pipeline_models,
             )
+        elif pipeline_kind == "ic_lora":
+            from .ltx_pipelines.ic_lora import ICLoraPipeline
+            self.pipeline = ICLoraPipeline(
+                device=self.device,
+                stage_1_models=pipeline_models,
+                stage_2_models=pipeline_models,
+            )
         else:
             self.pipeline = TI2VidTwoStagesPipeline(
                 device=self.device,

@@ -55,38 +55,60 @@ class ICLoraPipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
-        spatial_upsampler_path: str,
-        gemma_root: str,
-        loras: list[LoraPathStrengthAndSDOps],
+        checkpoint_path: str | None = None,
+        spatial_upsampler_path: str | None = None,
+        gemma_root: str | None = None,
+        loras: list[LoraPathStrengthAndSDOps] | None = None,
         device: torch.device = device,
         fp8transformer: bool = False,
+        stage_1_models: object | None = None,
+        stage_2_models: object | None = None,
     ):
         self.dtype = torch.bfloat16
-        self.stage_1_model_ledger = ModelLedger(
-            dtype=self.dtype,
-            device=device,
-            checkpoint_path=checkpoint_path,
-            spatial_upsampler_path=spatial_upsampler_path,
-            gemma_root_path=gemma_root,
-            loras=loras,
-            fp8transformer=fp8transformer,
-        )
-        self.stage_2_model_ledger = ModelLedger(
-            dtype=self.dtype,
-            device=device,
-            checkpoint_path=checkpoint_path,
-            spatial_upsampler_path=spatial_upsampler_path,
-            gemma_root_path=gemma_root,
-            loras=[],
-            fp8transformer=fp8transformer,
-        )
+        self.device = device
+        self.stage_1_models = stage_1_models
+        self.stage_2_models = stage_2_models or stage_1_models
+        if self.stage_1_models is None:
+            if checkpoint_path is None or gemma_root is None or spatial_upsampler_path is None:
+                raise ValueError("checkpoint_path, gemma_root, and spatial_upsampler_path are required.")
+            self.stage_1_model_ledger = ModelLedger(
+                dtype=self.dtype,
+                device=device,
+                checkpoint_path=checkpoint_path,
+                spatial_upsampler_path=spatial_upsampler_path,
+                gemma_root_path=gemma_root,
+                loras=loras or [],
+                fp8transformer=fp8transformer,
+            )
+            self.stage_2_model_ledger = ModelLedger(
+                dtype=self.dtype,
+                device=device,
+                checkpoint_path=checkpoint_path,
+                spatial_upsampler_path=spatial_upsampler_path,
+                gemma_root_path=gemma_root,
+                loras=[],
+                fp8transformer=fp8transformer,
+            )
+        else:
+            self.stage_1_model_ledger = None
+            self.stage_2_model_ledger = None
         self.pipeline_components = PipelineComponents(
             dtype=self.dtype,
             device=device,
         )
-        self.device = device
         self.text_encoder_cache = TextEncoderCache()
+
+    def _get_stage_model(self, stage: int, name: str):
+        """Resolve a model component from either stage_*_models or stage_*_model_ledger."""
+        if stage == 1:
+            models, ledger = self.stage_1_models, self.stage_1_model_ledger
+        else:
+            models, ledger = self.stage_2_models, self.stage_2_model_ledger
+        if models is not None:
+            return getattr(models, name)
+        if ledger is None:
+            raise ValueError(f"Missing model source for stage {stage} '{name}'.")
+        return getattr(ledger, name)()
 
     @torch.inference_mode()
     def __call__(
@@ -109,6 +131,13 @@ class ICLoraPipeline:
         text_connectors: dict | None = None,
         masking_source: dict | None = None,
         masking_strength: float | None = None,
+        latent_conditioning_stage2: torch.Tensor | None = None,
+        return_latent_slice: object | None = None,
+        self_refiner_setting: int = 0,
+        self_refiner_plan: str = "",
+        self_refiner_f_uncertainty: float = 0.1,
+        self_refiner_certain_percentage: float = 0.999,
+        self_refiner_max_plans: int = 1,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
         assert_resolution(height=height, width=width, is_two_stage=True)
         alt_guidance_scale = 1.0
@@ -119,7 +148,7 @@ class ICLoraPipeline:
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
 
-        text_encoder = self.stage_1_model_ledger.text_encoder()
+        text_encoder = self._get_stage_model(1, "text_encoder")
 
         if enhance_prompt:
             prompt = generate_enhanced_prompt(
@@ -147,8 +176,8 @@ class ICLoraPipeline:
         video_context, audio_context = contexts[0]
 
         # Stage 1: Initial low resolution video generation.
-        video_encoder = self.stage_1_model_ledger.video_encoder()
-        transformer = self.stage_1_model_ledger.transformer()
+        video_encoder = self._get_stage_model(1, "video_encoder")
+        transformer = self._get_stage_model(1, "transformer")
         bind_interrupt_check(transformer, interrupt_check)
         stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
         if loras_slists is not None:
@@ -245,13 +274,13 @@ class ICLoraPipeline:
         upscaled_video_latent = upsample_video(
             latent=video_state.latent[:1],
             video_encoder=video_encoder,
-            upsampler=self.stage_2_model_ledger.spatial_upsampler(),
+            upsampler=self._get_stage_model(2, "spatial_upsampler"),
         )
 
         torch.cuda.synchronize()
         cleanup_memory()
 
-        transformer = self.stage_2_model_ledger.transformer()
+        transformer = self._get_stage_model(2, "transformer")
         bind_interrupt_check(transformer, interrupt_check)
         distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
         if loras_slists is not None:
@@ -343,9 +372,9 @@ class ICLoraPipeline:
         del video_encoder
         cleanup_memory()
 
-        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config)
+        decoded_video = vae_decode_video(video_state.latent, self._get_stage_model(2, "video_decoder"), tiling_config)
         decoded_audio = vae_decode_audio(
-            audio_state.latent, self.stage_2_model_ledger.audio_decoder(), self.stage_2_model_ledger.vocoder()
+            audio_state.latent, self._get_stage_model(2, "audio_decoder"), self._get_stage_model(2, "vocoder")
         )
         return decoded_video, decoded_audio
 

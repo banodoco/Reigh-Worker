@@ -463,6 +463,80 @@ class TestLTX2EndToEndSmoke:
         assert orch.load_model("ltx2_19B") is False  # noop
 
 
+class TestICLoraAudioImageSmoke:
+    """IC LoRA pipeline tests: signature introspection, audio conditioning
+    format, and smoke test with images + audio via WanOrchestrator.
+
+    NOTE: ICLoraPipeline is not currently reachable from the pipeline routing
+    in ltx2.py (line 447). Only "distilled" and "two_stage" kinds are handled.
+    The smoke test exercises the standard TI2VidTwoStagesPipeline path.
+    """
+
+    def test_ic_lora_with_images_and_audio(
+        self, _chdir_to_wan2gp, output_dir, start_image, end_image, audio_file, sample_video
+    ):
+        """Smoke test: LTX-2 generation with start/end images and audio."""
+        orch = _make_orchestrator(_chdir_to_wan2gp, output_dir)
+        orch.load_model("ltx2_19B")
+        result = orch.generate(
+            prompt="IC LoRA test with images and audio conditioning",
+            resolution="768x512",
+            video_length=49,
+            start_image=start_image,
+            end_image=end_image,
+            audio_input=audio_file,
+            audio_scale=0.8,
+            seed=42,
+        )
+        assert result is not None, "generate() returned None"
+        assert os.path.exists(result), f"Output file does not exist: {result}"
+        assert os.path.getsize(result) > 0, f"Output file is empty: {result}"
+
+    def test_ic_lora_pipeline_accepts_all_conditioning_types(self):
+        """ICLoraPipeline.__call__ should accept images, video_conditioning,
+        and audio_conditionings parameters (via AST to avoid heavy imports)."""
+        import ast
+
+        src_path = PROJECT_ROOT / "Wan2GP" / "models" / "ltx2" / "ltx_pipelines" / "ic_lora.py"
+        tree = ast.parse(src_path.read_text())
+
+        call_params = set()
+        call_annotations = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "__call__":
+                for arg in node.args.args:
+                    call_params.add(arg.arg)
+                    if arg.annotation:
+                        call_annotations[arg.arg] = ast.dump(arg.annotation)
+                break
+
+        # Verify key conditioning parameters exist
+        assert "images" in call_params
+        assert "video_conditioning" in call_params
+        assert "audio_conditionings" in call_params
+
+        # Verify list type annotations via AST
+        assert "list" in call_annotations.get("images", "").lower()
+        assert "list" in call_annotations.get("video_conditioning", "").lower()
+
+    def test_audio_conditioning_format(self):
+        """AudioConditionByLatent should be instantiable and expose
+        latent, strength, and a callable apply_to method."""
+        try:
+            import torch
+            from Wan2GP.models.ltx2.ltx_core.conditioning.types.latent_cond import AudioConditionByLatent
+        except ImportError as exc:
+            pytest.skip(f"Skipping due to missing dependency: {exc}")
+
+        dummy = torch.zeros(1, 8, 4, 64)
+        cond = AudioConditionByLatent(latent=dummy, strength=0.8)
+
+        assert cond.latent is dummy
+        assert cond.strength == 0.8
+        assert hasattr(cond, "apply_to")
+        assert callable(cond.apply_to)
+
+
 # ---------------------------------------------------------------------------
 # Standalone runner
 # ---------------------------------------------------------------------------
