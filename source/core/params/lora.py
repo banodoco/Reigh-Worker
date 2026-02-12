@@ -275,14 +275,11 @@ class LoRAConfig(ParamGroup):
                 activated_loras.append(path)
                 multipliers.append(str(entry.multiplier))
         
-        # Format multipliers based on content
-        has_phase_config = any(e.is_phase_config_multiplier() for e in ready_entries)
-        if has_phase_config:
-            # Space-separated for phase-config format
-            loras_multipliers = ' '.join(multipliers)
-        else:
-            # Comma-separated for regular format
-            loras_multipliers = ','.join(multipliers)
+        # Format multipliers as space-separated string
+        # WGP's preparse_loras_multipliers() splits on spaces, so both
+        # phase-config ("0.9;0.5 1.1;1.1") and regular ("0.9 1.1 0.5")
+        # must be space-separated
+        loras_multipliers = ' '.join(multipliers)
         
         return {
             'activated_loras': activated_loras,

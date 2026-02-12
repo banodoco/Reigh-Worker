@@ -715,7 +715,8 @@ class WanOrchestrator:
             eff_multipliers = lora_multipliers or kwargs.get('lora_multipliers') or kwargs.get('loras_multipliers')
             if eff_multipliers:
                 if isinstance(eff_multipliers, str):
-                    loras_multipliers_str = eff_multipliers
+                    # WGP splits on spaces; replace commas defensively
+                    loras_multipliers_str = eff_multipliers.replace(',', ' ')
                 else:
                     loras_multipliers_str = " ".join(str(m) for m in eff_multipliers)
             else:
