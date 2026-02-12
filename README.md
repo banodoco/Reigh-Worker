@@ -62,8 +62,8 @@ queue.stop()
 ## Debugging
 
 ```bash
-python debug.py task <task_id>          # Investigate a task
-python debug.py tasks --status Failed   # List recent failures
+python -m debug task <task_id>          # Investigate a task
+python -m debug tasks --status Failed   # List recent failures
 ```
 
 ## Project Structure
