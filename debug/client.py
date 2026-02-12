@@ -1,8 +1,6 @@
 """Unified client for debugging data access."""
 
 import os
-import sys
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from collections import Counter
@@ -78,6 +76,7 @@ class LogQueryClient:
             return result.data or []
         except Exception as e:
             # system_logs table might not exist in this setup
+            print(f"[DEBUG] Failed to query system_logs: {e}")
             return []
     
     def get_task_timeline(self, task_id: str) -> List[Dict[str, Any]]:
@@ -170,9 +169,9 @@ class DebugClient:
             ).eq('dependant_on', orchestrator_id).order('created_at').execute()
             if result.data:
                 child_tasks.extend(result.data)
-        except:
-            pass
-        
+        except Exception as e:
+            print(f"[DEBUG] Failed to query child tasks by dependant_on: {e}")
+
         # Method 2: Look for orchestrator_task_id in params (for travel segments)
         # This requires a more complex query - check params JSON
         try:
@@ -201,7 +200,8 @@ class DebugClient:
                             import json
                             try:
                                 task_params = json.loads(task_params)
-                            except:
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to parse task params JSON for task {task.get('id')}: {e}")
                                 continue
                         
                         # Check orchestrator_task_id_ref or orchestrator_details.orchestrator_task_id
@@ -213,8 +213,8 @@ class DebugClient:
                         if ref_id == orchestrator_id and task['id'] not in [t['id'] for t in child_tasks]:
                             child_tasks.append(task)
         except Exception as e:
-            pass
-        
+            print(f"[DEBUG] Failed to query child tasks by project_id/params: {e}")
+
         # Sort by segment_index if available, otherwise by created_at
         def sort_key(task):
             params = task.get('params', {})
@@ -222,7 +222,8 @@ class DebugClient:
                 import json
                 try:
                     params = json.loads(params)
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse params JSON for sort_key: {e}")
                     params = {}
             segment_idx = params.get('segment_index', 999)
             return (segment_idx, task.get('created_at', ''))
@@ -249,17 +250,17 @@ class DebugClient:
         try:
             result = self.supabase.table('workers').select('*').eq('id', worker_id).execute()
             state = result.data[0] if result.data else None
-        except:
-            pass
-        
+        except Exception as e:
+            print(f"[DEBUG] Failed to query worker state for {worker_id}: {e}")
+
         # Get tasks assigned to this worker
         tasks = []
         try:
             tasks_result = self.supabase.table('tasks').select('*').eq('worker_id', worker_id).order('created_at', desc=True).limit(20).execute()
             tasks = tasks_result.data or []
-        except:
-            pass
-        
+        except Exception as e:
+            print(f"[DEBUG] Failed to query tasks for worker {worker_id}: {e}")
+
         return WorkerInfo(
             worker_id=worker_id,
             state=state,
@@ -327,7 +328,8 @@ class DebugClient:
                     started = datetime.fromisoformat(task['generation_started_at'].replace('Z', '+00:00'))
                     processed = datetime.fromisoformat(task['generation_processed_at'].replace('Z', '+00:00'))
                     processing_times.append((processed - started).total_seconds())
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse processing times for task {task.get('id')}: {e}")
                     pass
             
             if task.get('created_at') and task.get('generation_started_at'):
@@ -335,7 +337,8 @@ class DebugClient:
                     created = datetime.fromisoformat(task['created_at'].replace('Z', '+00:00'))
                     started = datetime.fromisoformat(task['generation_started_at'].replace('Z', '+00:00'))
                     queue_times.append((started - created).total_seconds())
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse queue times for task {task.get('id')}: {e}")
                     pass
         
         timing_stats = {
@@ -386,9 +389,9 @@ class DebugClient:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             result = self.supabase.table('workers').select('*').gte('created_at', cutoff_time.isoformat()).order('created_at', desc=True).execute()
             workers = result.data or []
-        except:
-            pass
-        
+        except Exception as e:
+            print(f"[DEBUG] Failed to query workers summary: {e}")
+
         # Calculate statistics
         now = datetime.now(timezone.utc)
         status_counts = Counter(w.get('status') for w in workers)
@@ -407,7 +410,8 @@ class DebugClient:
                             active_healthy += 1
                         else:
                             active_stale += 1
-                    except:
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to parse heartbeat for worker {worker.get('id')}: {e}")
                         active_stale += 1
         
         # Get recent failures
@@ -449,9 +453,9 @@ class DebugClient:
         try:
             workers_result = self.supabase.table('workers').select('*').neq('status', 'terminated').execute()
             workers = workers_result.data or []
-        except:
-            pass
-        
+        except Exception as e:
+            print(f"[DEBUG] Failed to query workers for system health: {e}")
+
         workers_active = len([w for w in workers if w.get('status') == 'active'])
         workers_spawning = len([w for w in workers if w.get('status') == 'spawning'])
         
@@ -463,7 +467,8 @@ class DebugClient:
                     hb_time = datetime.fromisoformat(worker['last_heartbeat'].replace('Z', '+00:00'))
                     if (now - hb_time).total_seconds() < 60:
                         workers_healthy += 1
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse heartbeat for worker {worker.get('id')}: {e}")
                     pass
         
         # Get task counts

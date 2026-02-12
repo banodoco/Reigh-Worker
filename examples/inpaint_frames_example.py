@@ -169,7 +169,8 @@ def run_inpaint_frames(
                 import shutil
                 shutil.move(str(result_path), str(final_output))
 
-                file_size = final_output.stat().st_size / (1024 * 1024)  # MB
+                BYTES_PER_MB = 1024 * 1024
+                file_size = final_output.stat().st_size / BYTES_PER_MB  # MB
                 print(f"💾 Saved to: {final_output}")
                 print(f"📊 File size: {file_size:.1f}MB")
 
@@ -177,8 +178,8 @@ def run_inpaint_frames(
                 try:
                     shutil.rmtree(output_dir)
                     print(f"🧹 Cleaned up temp directory")
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Warning: Failed to clean up temp directory: {e}")
 
                 print()
                 print("=" * 80)
@@ -288,7 +289,7 @@ Examples:
         try:
             w, h = map(int, args.resolution.split('x'))
             resolution = (w, h)
-        except:
+        except Exception:
             print(f"❌ Invalid resolution format: {args.resolution}")
             print("   Use format: WIDTHxHEIGHT (e.g. 1280x720)")
             return 1

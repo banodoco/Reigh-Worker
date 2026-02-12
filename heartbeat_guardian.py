@@ -13,13 +13,14 @@ The guardian:
 """
 
 import sys
+
 import time
 import json
 import subprocess
 import os
 import signal
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
 def check_process_alive(pid: int, start_time: float = None) -> bool:
     """
@@ -55,7 +56,7 @@ def check_process_alive(pid: int, start_time: float = None) -> bool:
                     if not cmdline or 'python' not in cmdline[0].lower():
                         print(f"[GUARDIAN] PID {pid} is not a Python process: {cmdline}", flush=True)
                         return False
-                except:
+                except Exception:
                     pass  # cmdline() can fail, don't fail the check for this
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, ImportError):
@@ -78,8 +79,8 @@ def get_vram_info() -> tuple[int, int]:
         if result.returncode == 0:
             total, used = result.stdout.strip().split(',')
             return int(float(total)), int(float(used))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GUARDIAN] Failed to query GPU memory: {e}")
     return 0, 0
 
 def collect_logs_from_queue(log_queue, max_count: int = 100) -> List[Dict[str, Any]]:
@@ -98,7 +99,7 @@ def collect_logs_from_queue(log_queue, max_count: int = 100) -> List[Dict[str, A
         try:
             log_entry = log_queue.get_nowait()
             logs.append(log_entry)
-        except:
+        except Exception:
             break  # Queue empty
     return logs
 
@@ -200,8 +201,8 @@ def guardian_main(worker_id: str, worker_pid: int, log_queue, config: Dict[str, 
         try:
             with open(f'/tmp/guardian_crash_{worker_id}.log', 'w') as f:
                 f.write(error_msg)
-        except:
-            pass
+        except Exception as e_log:
+            print(f"[GUARDIAN] Failed to write crash log: {e_log}")
         raise
 
     while True:

@@ -17,10 +17,7 @@ try:
 except ImportError:
     replicate = None
 
-from .. import db_operations as db_ops
-from ..common_utils import (
-    get_unique_target_path,
-    download_image_if_url,
+from ..utils import (
     prepare_output_path_with_upload,
     upload_and_get_final_output_location,
     report_orchestrator_failure
@@ -65,7 +62,7 @@ def _handle_magic_edit_task(
             return False, msg
             
         # Use centralized extraction function for orchestrator_details
-        from ..common_utils import extract_orchestrator_parameters
+        from ..utils import extract_orchestrator_parameters
         extracted_params = extract_orchestrator_parameters(task_params_from_db, task_id, dprint)
         
         # Required parameters (now available at top level)
@@ -189,12 +186,13 @@ def _handle_magic_edit_task(
             try:
                 shutil.rmtree(temp_dir)
                 dprint(f"Task {task_id}: Cleaned up temp directory: {temp_dir}")
-            except Exception as e_cleanup:
+            except OSError as e_cleanup:
                 print(f"[WARNING Task ID: {task_id}] Failed to cleanup temp directory {temp_dir}: {e_cleanup}")
+                # Cleanup failure is non-fatal; the task result is already determined
                 
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
         print(f"[ERROR Task ID: {task_id}] Magic edit task failed: {e}")
         traceback.print_exc()
         msg = f"Magic edit exception: {e}"
         report_orchestrator_failure(task_params_from_db, msg, dprint)
-        return False, msg 
+        return False, msg

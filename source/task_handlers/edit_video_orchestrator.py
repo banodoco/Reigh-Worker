@@ -25,20 +25,20 @@ The extracted keeper clips are passed to the shared _create_join_chain_tasks()
 function which creates the same join_clips_segment tasks as join_clips_orchestrator.
 """
 
-import subprocess
 import traceback
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict
 
-from .. import db_operations as db_ops
-from ..common_utils import download_video_if_url, get_video_frame_count_and_fps
-from ..video_utils import extract_frame_range_to_video, ensure_video_fps, get_video_frame_count_ffprobe, get_video_fps_ffprobe
+from ..utils import download_video_if_url, get_video_frame_count_and_fps
+from ..media.video import extract_frame_range_to_video, ensure_video_fps, get_video_frame_count_ffprobe, get_video_fps_ffprobe
 
-# Import shared functions from join_clips_orchestrator
-from .join_clips_orchestrator import (
+# Import shared functions from join subpackage
+from source.task_handlers.join.shared import (
     _extract_join_settings_from_payload,
     _check_existing_join_tasks,
     _create_join_chain_tasks,
+)
+from source.task_handlers.join.vlm_enhancement import (
     _extract_boundary_frames_for_vlm,
     _generate_vlm_prompts_for_joins,
 )
@@ -173,9 +173,9 @@ def _extract_clip_frames(
 ) -> Path | None:
     """
     Extract a frame range from video using frame-accurate FFmpeg selection.
-    
-    Wrapper around extract_frame_range_to_video() from video_utils.
-    
+
+    Wrapper around extract_frame_range_to_video().
+
     Args:
         source_video: Path to source video
         output_path: Path for output clip
@@ -222,8 +222,9 @@ def _get_clip_url_or_path(
     # share filesystem or can download URLs. The join_clips_segment handler
     # already supports both paths and URLs via download_video_if_url().
     
-    # TODO: For fully distributed deployments without shared storage,
-    # implement upload here and return the storage URL.
+    # NOTE: For fully distributed deployments without shared storage,
+    # this function should upload to Supabase storage and return the URL.
+    # Currently not needed because workers share filesystem.
     
     dprint(f"[EDIT_VIDEO] Keeper clip {clip_name} at: {local_path}")
     return str(local_path)
@@ -315,7 +316,7 @@ def _preprocess_portions_to_regenerate(
                         f"@payload_fps({target_fps}): {sf_payload}-{ef_payload}"
                         + (f", @ffprobe_fps({ffprobe_fps_before:.6f}): {sf_ff}-{ef_ff}" if ffprobe_fps_before else "")
                     )
-                except Exception as conv_err:
+                except (ValueError, KeyError, TypeError) as conv_err:
                     dprint(f"{DEBUG_TAG} [EDIT_VIDEO] Portion {i}: time↔frame conversion error: {conv_err}")
             else:
                 dprint(f"{DEBUG_TAG} [EDIT_VIDEO] Portion {i}: frames={sf}-{ef} (no times provided)")
@@ -469,7 +470,7 @@ def _preprocess_portions_to_regenerate(
             "per_join_settings": new_per_join_settings
         }
         
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
@@ -603,7 +604,7 @@ def _handle_edit_video_orchestrator_task(
             try:
                 base_prompt = join_settings.get("prompt", "")
                 gap_frame_count = join_settings.get("gap_frame_count", 53)
-                fps = orchestrator_payload.get("source_video_fps", 16)
+                _fps = orchestrator_payload.get("source_video_fps", 16)
                 
                 # Use replace_mode=False for VLM frame extraction because keeper clips are
                 # already clean - anchors are at the boundaries (last/first frames), not
@@ -627,7 +628,7 @@ def _handle_edit_video_orchestrator_task(
                 valid_count = sum(1 for p in vlm_enhanced_prompts if p is not None)
                 dprint(f"[EDIT_VIDEO] VLM enhancement complete: {valid_count}/{num_joins} prompts generated")
                 
-            except Exception as vlm_error:
+            except (RuntimeError, ValueError, OSError) as vlm_error:
                 dprint(f"[EDIT_VIDEO] VLM enhancement failed, using base prompts: {vlm_error}")
                 traceback.print_exc()
                 vlm_enhanced_prompts = [None] * num_joins
@@ -654,7 +655,7 @@ def _handle_edit_video_orchestrator_task(
         dprint(f"[EDIT_VIDEO] {message}")
         return success, message
         
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
         msg = f"Failed during edit_video orchestration: {e}"
         dprint(f"[EDIT_VIDEO] ERROR: {msg}")
         traceback.print_exc()

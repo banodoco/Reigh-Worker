@@ -11,10 +11,9 @@ debug/preview videos showing the generation process with:
 import json
 import tempfile
 from pathlib import Path
-from typing import Optional
 
-from ..common_utils import prepare_output_path_with_upload
-from ..visualization_utils import create_travel_visualization
+from ..utils import prepare_output_path_with_upload
+from ..media.visualization import create_travel_visualization
 
 
 def _handle_create_visualization_task(
@@ -111,7 +110,7 @@ def _handle_create_visualization_task(
         shutil.copy2(viz_path, final_path)
 
         # Handle upload and get final DB location
-        from ..common_utils import upload_and_get_final_output_location
+        from ..utils import upload_and_get_final_output_location
         output_location = upload_and_get_final_output_location(
             local_file_path=Path(final_path),
             supabase_object_name=viz_task_id_str,
@@ -127,7 +126,7 @@ def _handle_create_visualization_task(
 
         return True, output_location
 
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as e:
         error_msg = f"[ERROR Task ID: {viz_task_id_str}] Visualization failed: {e}"
         dprint(error_msg)
         import traceback

@@ -14,8 +14,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from source.phase_multiplier_utils import get_phase_loras
-from source.hires_utils import HiresFixHelper
+from source.params.phase_multiplier_utils import get_phase_loras
+from source.video.hires_utils import HiresFixHelper
 
 from diffusers.image_processor import VaeImageProcessor
 from .transformer_qwenimage import QwenImageTransformer2DModel

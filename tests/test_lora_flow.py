@@ -8,7 +8,7 @@ Run with: python -m pytest tests/test_lora_flow.py -v
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import os
 import sys
 from pathlib import Path
@@ -16,9 +16,9 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from source.task_conversion import parse_phase_config
-from source.params import TaskConfig, LoRAConfig, LoRAStatus
-from source.lora_utils import _download_lora_from_url
+from source.task_handlers.tasks.task_conversion import parse_phase_config
+from source.core.params import TaskConfig, LoRAConfig, LoRAStatus
+from source.models.lora.lora_utils import _download_lora_from_url
 
 
 class TestLoRAFlow:
@@ -192,7 +192,7 @@ class TestLoRAFlow:
         assert len(pending) == 2
         
         # 5. Mock the download step
-        with patch('source.lora_utils._download_lora_from_url') as mock_download:
+        with patch('source.models.lora.lora_utils._download_lora_from_url') as mock_download:
             # Mock returns the filename
             mock_download.side_effect = lambda url, task_id, dprint=None: os.path.basename(url)
             
@@ -393,7 +393,7 @@ class TestFromDbTask:
         assert wgp["activated_loras"] == []
         
         # Validation should warn about pending downloads
-        errors = config.validate()
+        config.validate()
         # Note: validate() may or may not flag this as an error
 
 
@@ -513,7 +513,7 @@ class TestQueueIntegration:
             config.lora.mark_downloaded(url, local_filename)
         
         # Step 4: Validate
-        errors = config.validate()
+        config.validate()
         # Should have no critical errors after download
         
         # Step 5: Convert to WGP format
@@ -599,7 +599,7 @@ class TestDownloaderUtils:
             return filename, None
 
         # lora_utils imports urlretrieve directly: `from urllib.request import urlretrieve`
-        import source.lora_utils as lora_utils
+        import source.models.lora.lora_utils as lora_utils
         monkeypatch.setattr(lora_utils, "urlretrieve", fake_urlretrieve)
 
         url = "https://example.com/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors"

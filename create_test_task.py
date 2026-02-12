@@ -575,8 +575,11 @@ def create_task(task_type: str, dry_run: bool = False) -> str:
             print(f"❌ Failed to create task: {response.status_code}")
             print(f"   Response: {response.text}")
             sys.exit(1)
+    except httpx.HTTPError as e:
+        print(f"❌ HTTP error creating task: {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"❌ Error creating task: {e}")
+        print(f"❌ Unexpected error creating task: {e}")
         sys.exit(1)
 
 
@@ -600,8 +603,11 @@ def create_all_tasks(dry_run: bool = False):
             task_id = create_task(task_type, dry_run=dry_run)
             created_ids.append((task_type, task_id))
             print()  # Add spacing between tasks
+        except (SystemExit, KeyboardInterrupt):
+            raise
         except Exception as e:
             print(f"❌ Failed to create {task_type}: {e}\n")
+            # Continue creating remaining tasks rather than aborting
 
     if created_ids and not dry_run:
         print("\n" + "=" * 80)

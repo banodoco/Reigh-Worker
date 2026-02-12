@@ -1,0 +1,81 @@
+"""Extract frame task handler."""
+
+import traceback
+from pathlib import Path
+
+import cv2
+
+from source import db_operations as db_ops
+from source.utils import save_frame_from_video, report_orchestrator_failure, prepare_output_path_with_upload, upload_and_get_final_output_location
+from source.core.log import task_logger
+
+
+def handle_extract_frame_task(task_params_dict: dict, main_output_dir_base: Path, task_id: str, dprint: callable):
+    """Handles the 'extract_frame' task."""
+    task_logger.essential("Starting extract frame task", task_id=task_id)
+
+    input_video_task_id = task_params_dict.get("input_video_task_id")
+    frame_index = task_params_dict.get("frame_index", 0)  # Default to first frame
+    custom_output_dir = task_params_dict.get("output_dir")
+
+    if not input_video_task_id:
+        msg = f"Task {task_id}: Missing 'input_video_task_id' in payload."
+        report_orchestrator_failure(task_params_dict, msg, dprint)
+        return False, msg
+
+    try:
+        video_path_from_db = db_ops.get_task_output_location_from_db(input_video_task_id)
+        if not video_path_from_db:
+            msg = f"Task {task_id}: Could not find output location for dependency task {input_video_task_id}."
+            report_orchestrator_failure(task_params_dict, msg, dprint)
+            return False, msg
+
+        video_abs_path = db_ops.get_abs_path_from_db_path(video_path_from_db, dprint)
+        if not video_abs_path:
+            msg = f"Task {task_id}: Could not resolve or find video file from DB path '{video_path_from_db}'."
+            report_orchestrator_failure(task_params_dict, msg, dprint)
+            return False, msg
+
+        output_filename = f"{task_id}_frame_{frame_index}.png"
+        final_save_path, initial_db_location = prepare_output_path_with_upload(
+            task_id,
+            output_filename,
+            main_output_dir_base,
+            task_type="extract_frame",
+            dprint=dprint,
+            custom_output_dir=custom_output_dir
+        )
+
+        cap = cv2.VideoCapture(str(video_abs_path))
+        if not cap.isOpened():
+            msg = f"Task {task_id}: Could not open video file {video_abs_path}"
+            report_orchestrator_failure(task_params_dict, msg, dprint)
+            return False, msg
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        success = save_frame_from_video(
+            video_path=video_abs_path,
+            frame_index=frame_index,
+            output_image_path=final_save_path,
+            resolution=(width, height)
+        )
+
+        if success:
+            final_db_location = upload_and_get_final_output_location(
+                final_save_path, task_id, initial_db_location, dprint=dprint
+            )
+            print(f"[Task ID: {task_id}] Successfully extracted frame {frame_index} to: {final_save_path}")
+            return True, final_db_location
+        else:
+            msg = f"Task {task_id}: save_frame_from_video utility failed for video {video_abs_path}."
+            report_orchestrator_failure(task_params_dict, msg, dprint)
+            return False, msg
+
+    except (OSError, ValueError, RuntimeError) as e:
+        error_msg = f"Task {task_id}: Failed during frame extraction: {e}"
+        print(f"[ERROR] {error_msg}")
+        traceback.print_exc()
+        report_orchestrator_failure(task_params_dict, error_msg, dprint)
+        return False, str(e)

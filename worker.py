@@ -20,7 +20,7 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 # Suppress ALSA errors on Linux (moved to platform_utils for cleaner code)
-from source.platform_utils import suppress_alsa_errors
+from source.core.platform_utils import suppress_alsa_errors
 suppress_alsa_errors()
 
 import argparse
@@ -43,21 +43,21 @@ if wan2gp_path not in sys.path:
     sys.path.append(wan2gp_path)
 
 from source import db_operations as db_ops
-from source.fatal_error_handler import FatalWorkerError, reset_fatal_error_counter, is_retryable_error
+from source.task_handlers.worker.fatal_error_handler import FatalWorkerError, reset_fatal_error_counter, is_retryable_error
 from headless_model_management import HeadlessTaskQueue
 
-from source.logging_utils import (
+from source.core.log import (
     headless_logger, enable_debug_mode, disable_debug_mode,
     LogBuffer, CustomLogInterceptor, set_log_interceptor, set_log_file
 )
-from source.worker_utils import (
-    dprint, log_ram_usage, cleanup_generated_files
+from source.task_handlers.worker.worker_utils import (
+    dprint, cleanup_generated_files
 )
-from source.heartbeat_utils import start_heartbeat_guardian_process
-from source.task_registry import TaskRegistry
+from source.task_handlers.worker.heartbeat_utils import start_heartbeat_guardian_process
+from source.task_handlers.tasks.task_registry import TaskRegistry
 from source.task_handlers import travel_between_images as tbi
-from source.lora_utils import cleanup_legacy_lora_collisions
-from source.common_utils import prepare_output_path, _get_task_type_directory
+from source.models.lora.lora_utils import cleanup_legacy_lora_collisions
+from source.utils import prepare_output_path
 import shutil
 
 # Global heartbeat control
@@ -84,7 +84,7 @@ def move_wgp_output_to_task_type_dir(output_path: str, task_type: str, task_id: 
         New path if file was moved, original path otherwise
     """
     # Only process WGP task types
-    from source.task_types import WGP_TASK_TYPES
+    from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
     if task_type not in WGP_TASK_TYPES:
         return output_path
 
@@ -126,7 +126,7 @@ def move_wgp_output_to_task_type_dir(output_path: str, task_type: str, task_id: 
         headless_logger.success(f"Moved WGP output to {new_path}", task_id=task_id)
         return str(new_path)
 
-    except Exception as e:
+    except (OSError, shutil.Error, ValueError) as e:
         headless_logger.error(f"Failed to move WGP output to task-type directory: {e}", task_id=task_id)
         traceback.print_exc()
         # Return original path if move fails
@@ -168,9 +168,9 @@ def process_single_task(task_params_dict, main_output_dir_base: Path, task_type:
                 headless_logger.error(f"Travel chaining failed: {chain_message}", task_id=task_id)
 
         if chaining_result_path_override:
-                output_location_to_db = chaining_result_path_override
+            output_location_to_db = chaining_result_path_override
 
-        # Move WGP outputs to task-type subdirectories (Phase 2)
+        # Move WGP outputs to task-type subdirectories
         # This post-processes WGP-generated files to organize them by task_type
         if output_location_to_db:
             output_location_to_db = move_wgp_output_to_task_type_dir(
@@ -281,7 +281,7 @@ def main():
         # (fatal_error_handler during crashes, headless_wgp notify_model_switch)
         os.environ["SUPABASE_URL"] = cli_args.supabase_url
 
-    except Exception as e:
+    except (ValueError, OSError, KeyError) as e:
         headless_logger.critical(f"Supabase init failed: {e}")
         sys.exit(1)
 
@@ -329,7 +329,7 @@ def main():
         if cli_args.wgp_preload: wgp_mod.server_config["preload_in_VRAM"] = cli_args.wgp_preload
         if "transformer_types" not in wgp_mod.server_config: wgp_mod.server_config["transformer_types"] = []
 
-    except Exception as e:
+    except (ImportError, RuntimeError, AttributeError, KeyError) as e:
         headless_logger.critical(f"WGP import failed: {e}")
         sys.exit(1)
     finally:
@@ -348,7 +348,7 @@ def main():
         )
         preload_model = cli_args.preload_model if cli_args.preload_model else None
         task_queue.start(preload_model=preload_model)
-    except Exception as e:
+    except (RuntimeError, ValueError, OSError) as e:
         headless_logger.critical(f"Queue init failed: {e}")
         sys.exit(1)
 
@@ -403,7 +403,8 @@ def main():
                             data = json.loads(actual_output)
                             actual_output = data.get("output_location", actual_output)
                             thumbnail_url = data.get("thumbnail_url")
-                        except: pass
+                        except (json.JSONDecodeError, TypeError, KeyError):
+                            pass  # actual_output is a plain string, not JSON - use as-is
                         
                         db_ops.update_task_status_supabase(current_task_id, db_ops.STATUS_COMPLETE, actual_output, thumbnail_url)
                     else:

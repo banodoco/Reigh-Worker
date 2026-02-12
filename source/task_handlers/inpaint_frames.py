@@ -14,25 +14,23 @@ The task extracts context frames before and after the target range, then uses
 VACE to generate smooth replacement frames that blend naturally with the surrounding content.
 """
 
-import json
 import time
 from pathlib import Path
 from typing import Tuple
 
-from ..common_utils import (
+from ..utils import (
     ensure_valid_prompt,
     ensure_valid_negative_prompt,
     get_video_frame_count_and_fps
 )
-from ..video_utils import (
+from ..media.video import (
     extract_frames_from_video,
 )
-from ..vace_frame_utils import (
+from source.media.video.vace_frame_utils import (
     create_guide_and_mask_for_generation,
     prepare_vace_generation_params,
     validate_frame_range
 )
-from .. import db_operations as db_ops
 
 
 def _handle_inpaint_frames_task(
@@ -112,7 +110,7 @@ def _handle_inpaint_frames_task(
             total_frame_count, video_fps = get_video_frame_count_and_fps(str(video))
             dprint(f"[INPAINT_FRAMES] Task {task_id}: Video - {total_frame_count} frames @ {video_fps} fps")
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             error_msg = f"Failed to extract video properties: {e}"
             dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
             return False, error_msg
@@ -146,7 +144,7 @@ def _handle_inpaint_frames_task(
 
             dprint(f"[INPAINT_FRAMES] Task {task_id}: Extracted {len(all_frames)} frames from video")
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             error_msg = f"Failed to extract frames from video: {e}"
             dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
             import traceback
@@ -198,7 +196,7 @@ def _handle_inpaint_frames_task(
                 filename_prefix="inpaint",
                 dprint=dprint
             )
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             error_msg = f"Failed to create guide/mask videos: {e}"
             dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
             import traceback
@@ -297,14 +295,14 @@ def _handle_inpaint_frames_task(
             dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
             return False, error_msg
 
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:
             error_msg = f"Failed to submit/complete generation task: {e}"
             dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
             import traceback
             traceback.print_exc()
             return False, error_msg
 
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
         error_msg = f"Unexpected error in inpaint_frames handler: {e}"
         dprint(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}")
         import traceback
