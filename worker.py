@@ -374,11 +374,11 @@ def main():
                 db_ops.update_task_status_supabase(current_task_id, db_ops.STATUS_FAILED, "Orchestrator missing project_id")
                 continue
 
-            # Ensure task_id in params
-            if current_task_type in {"travel_orchestrator", "join_clips_orchestrator", "edit_video_orchestrator", "travel_segment", "individual_travel_segment", "join_clips_segment", "join_final_stitch"}:
-                current_task_params["task_id"] = current_task_id
-                if "orchestrator_details" in current_task_params:
-                    current_task_params["orchestrator_details"]["orchestrator_task_id"] = current_task_id
+            # Ensure params["task_id"] is the DB UUID (not the human-readable params.task_id)
+            # process_single_task reads task_id from params, so this must be set for ALL task types
+            current_task_params["task_id"] = current_task_id
+            if "orchestrator_details" in current_task_params:
+                current_task_params["orchestrator_details"]["orchestrator_task_id"] = current_task_id
 
             # Set current task context for log interceptor so all logs are associated with this task
             if _log_interceptor_instance:
