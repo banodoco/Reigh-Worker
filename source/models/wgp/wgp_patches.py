@@ -284,6 +284,88 @@ def apply_lora_key_tolerance_patch(wgp_module: "types.ModuleType") -> bool:
         return False
 
 
+def apply_lora_caching_patch() -> bool:
+    """
+    Cache LoRA loading between generations to avoid redundant reloads.
+
+    Why: WGP unloads LoRAs after every generation (wgp.py:6439) and mmgp's
+    load_loras_into_model always unloads before loading. For a 20B Qwen model
+    with CPU offloading, LoRA loading takes ~7 minutes per generation. When
+    running the same LoRAs repeatedly (batch qwen_image tasks, travel segments),
+    this is pure waste — 21 min of LoRA loading for 2.5 min of actual generation.
+
+    How:
+    - Patches offload.unload_loras_from_model to be a no-op (keeps LoRAs loaded)
+    - Patches offload.load_loras_into_model to skip if same LoRA files are
+      already loaded on the model, otherwise does a real unload + load cycle
+    - Cache is keyed on (model object identity, LoRA file paths)
+    - Safety: checks model._loras_adapters to verify LoRAs are actually loaded
+      (catches cases where error handlers cleared state)
+
+    Returns:
+        True if patch was applied successfully, False otherwise
+    """
+    try:
+        from mmgp import offload
+
+        _original_load = offload.load_loras_into_model
+        _original_unload = offload.unload_loras_from_model
+
+        def _cached_load(model, lora_path, lora_multi=None, **kwargs):
+            # check_only mode (used by LoRA validation) — pass through
+            if kwargs.get("check_only", False):
+                return _original_load(model, lora_path, lora_multi, **kwargs)
+
+            # Normalize to tuple for comparison
+            paths = lora_path if isinstance(lora_path, list) else [lora_path]
+            requested = tuple(paths)
+
+            # Check cache: same model object + same LoRA files + LoRAs actually loaded
+            cached = getattr(model, "_headless_cached_lora_paths", None)
+            if (
+                cached is not None
+                and cached == requested
+                and getattr(model, "_loras_adapters", None) is not None
+            ):
+                model_logger.essential(
+                    f"[LORA_CACHE] Skipping LoRA reload — same {len(requested)} LoRAs already loaded"
+                )
+                return
+
+            # Different LoRAs or first load — do full cycle
+            if cached is not None:
+                model_logger.essential(
+                    f"[LORA_CACHE] LoRAs changed ({len(cached)} -> {len(requested)}), reloading"
+                )
+            else:
+                model_logger.essential(f"[LORA_CACHE] First LoRA load: {len(requested)} LoRAs")
+
+            # Explicitly unload via original (our global patch is a no-op, and
+            # the internal unload inside _original_load also hits our no-op,
+            # so we must call the real one here)
+            _original_unload(model)
+
+            result = _original_load(model, lora_path, lora_multi, **kwargs)
+
+            # Tag model with what we loaded
+            model._headless_cached_lora_paths = requested
+            return result
+
+        def _deferred_unload(model):
+            """No-op — keeps LoRAs loaded for reuse by next generation."""
+            if model is None:
+                return
+            model_logger.debug("[LORA_CACHE] Deferring LoRA unload (cached for reuse)")
+
+        offload.load_loras_into_model = _cached_load
+        offload.unload_loras_from_model = _deferred_unload
+        return True
+
+    except (ImportError, AttributeError, RuntimeError) as e:
+        model_logger.debug(f"[LORA_CACHE] Failed to apply LoRA caching patch: {e}")
+        return False
+
+
 def apply_all_wgp_patches(wgp_module: "types.ModuleType", wan_root: str) -> dict:
     """
     Apply all WGP patches for headless operation.
@@ -302,6 +384,7 @@ def apply_all_wgp_patches(wgp_module: "types.ModuleType", wan_root: str) -> dict
     results["lora_multiplier_parser"] = apply_lora_multiplier_parser_patch(wgp_module)
     results["qwen_inpainting_lora"] = apply_qwen_inpainting_lora_patch()
     results["lora_key_tolerance"] = apply_lora_key_tolerance_patch(wgp_module)
+    results["lora_caching"] = apply_lora_caching_patch()
 
     # Log summary
     successful = [k for k, v in results.items() if v]
