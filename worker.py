@@ -235,10 +235,9 @@ def main():
         print("Error: Either --reigh-access-token or --supabase-access-token is required", file=sys.stderr)
         sys.exit(1)
 
-    # Auto-derive worker_id: explicit flag > RUNPOD_POD_ID > hostname
+    # Auto-derive worker_id when not explicitly provided
     if not cli_args.worker:
-        import socket
-        cli_args.worker = os.getenv("RUNPOD_POD_ID") or socket.gethostname()
+        cli_args.worker = os.getenv("RUNPOD_POD_ID") or "local-worker"
     os.environ["WORKER_ID"] = cli_args.worker
     os.environ["WAN2GP_WORKER_MODE"] = "true"
 
