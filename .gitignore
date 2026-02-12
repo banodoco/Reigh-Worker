@@ -72,16 +72,9 @@ samples/
 tests/
 tests_output/
 
-# Keep tests ignored by default, but allow tracking specific regression tests
+# Track all test files
 !tests/
-tests/*
-!tests/test_lora_flow.py
-!tests/test_ltx2_headless.py
-!tests/test_travel_between_images.py
-!tests/test_travel_real_gpu.py
-!tests/test_ltx2_headless.py
-!tests/test_travel_between_images.py
-!tests/test_travel_real_gpu.py
+!tests/README.md
 !tests/CICEK .png
 !tests/CICEK 2.png
 !tests/2AF816ADD8BC6EE937FEA5D5B3061DC047BBD8BA5A77E91A5158BF6C86C9FAD1.jpeg
