@@ -72,6 +72,7 @@ def configure_model_specific_params(
     video_prompt_type: Optional[str],
     control_net_weight: Optional[float],
     control_net_weight2: Optional[float],
+    min_frames: int = 5,
 ) -> Dict[str, Any]:
     """Compute model-specific generation parameters.
 
@@ -94,13 +95,13 @@ def configure_model_specific_params(
         image_mode = 0
         actual_video_length = final_video_length
 
-        # Safety check: Wan models with latent_size=4 crash if video_length < 4
-        if actual_video_length < 5:
+        # Safety check: models crash if video_length is too short
+        if actual_video_length < min_frames:
             generation_logger.warning(
-                f"[SAFETY] Boosting video_length from {actual_video_length} to 5 "
+                f"[SAFETY] Boosting video_length from {actual_video_length} to {min_frames} "
                 "to prevent quantization crash"
             )
-            actual_video_length = 5
+            actual_video_length = min_frames
 
         actual_batch_size = final_batch_size
         actual_guidance = final_guidance_scale

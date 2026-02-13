@@ -662,6 +662,7 @@ class WanOrchestrator:
             video_prompt_type=video_prompt_type,
             control_net_weight=control_net_weight,
             control_net_weight2=control_net_weight2,
+            min_frames=17 if self._is_ltx2() else 5,
         )
         image_mode = model_params["image_mode"]
         actual_video_length = model_params["actual_video_length"]

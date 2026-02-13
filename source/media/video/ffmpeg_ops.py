@@ -17,6 +17,8 @@ __all__ = [
     "extract_frame_range_to_video",
     "create_video_from_frames_list",
     "apply_saturation_to_video_ffmpeg",
+    "video_has_audio",
+    "mux_audio_from_segments",
 ]
 
 
@@ -441,3 +443,129 @@ def apply_saturation_to_video_ffmpeg(
         return False
     except subprocess.CalledProcessError:
         return False
+
+
+def video_has_audio(video_path: str | Path) -> bool:
+    """Check whether a video file contains at least one audio stream.
+
+    Uses ``ffprobe`` to inspect the container.  Returns ``False`` on any
+    error (missing file, ffprobe not installed, etc.).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return bool(result.stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def mux_audio_from_segments(
+    segment_video_paths: list[str | Path],
+    stitched_video_path: str | Path,
+    overlap_frames: list[int],
+    fps: float,
+    output_path: str | Path,
+) -> Path | None:
+    """Extract audio from segment videos, trim overlaps, concatenate, and mux onto the stitched video.
+
+    The function:
+    1. Filters segments that actually contain audio.
+    2. For each audio-bearing segment, trims the overlap region (so audio
+       does not double-up in crossfade zones).
+    3. Concatenates the trimmed audio tracks.
+    4. Muxes the result onto *stitched_video_path*, writing to *output_path*.
+
+    Returns *output_path* on success, or ``None`` if no audio was found or
+    the mux failed.
+    """
+    import tempfile
+
+    segment_video_paths = [Path(p) for p in segment_video_paths]
+    stitched_video_path = Path(stitched_video_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Identify segments with audio
+    audio_segments: list[tuple[int, Path]] = []
+    for idx, seg_path in enumerate(segment_video_paths):
+        if video_has_audio(seg_path):
+            audio_segments.append((idx, seg_path))
+
+    if not audio_segments:
+        generation_logger.debug("[MUX_AUDIO] No segments contain audio; skipping mux")
+        return None
+
+    generation_logger.debug(f"[MUX_AUDIO] {len(audio_segments)}/{len(segment_video_paths)} segments have audio")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            trimmed_audio_files: list[Path] = []
+
+            for seg_idx, seg_path in audio_segments:
+                # Compute trim: remove overlap_frames at the start for segments after the first
+                trim_start_s = 0.0
+                if seg_idx > 0 and seg_idx - 1 < len(overlap_frames):
+                    trim_start_s = overlap_frames[seg_idx - 1] / fps if fps > 0 else 0.0
+
+                audio_out = tmpdir / f"audio_{seg_idx:03d}.aac"
+                cmd = ["ffmpeg", "-y", "-i", str(seg_path)]
+                if trim_start_s > 0:
+                    cmd.extend(["-ss", f"{trim_start_s:.4f}"])
+                cmd.extend(["-vn", "-acodec", "aac", "-b:a", "192k", str(audio_out)])
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode != 0 or not audio_out.exists():
+                    generation_logger.debug(f"[MUX_AUDIO] Failed to extract audio from segment {seg_idx}")
+                    continue
+                trimmed_audio_files.append(audio_out)
+
+            if not trimmed_audio_files:
+                generation_logger.debug("[MUX_AUDIO] No audio tracks extracted successfully")
+                return None
+
+            # Concatenate audio files
+            concat_list = tmpdir / "concat.txt"
+            concat_list.write_text(
+                "\n".join(f"file '{f}'" for f in trimmed_audio_files)
+            )
+            concat_audio = tmpdir / "concat_audio.aac"
+            concat_cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c", "copy", str(concat_audio),
+            ]
+            result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0 or not concat_audio.exists():
+                generation_logger.debug("[MUX_AUDIO] Audio concatenation failed")
+                return None
+
+            # Mux audio onto stitched video
+            mux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(stitched_video_path),
+                "-i", str(concat_audio),
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                str(output_path),
+            ]
+            result = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+                generation_logger.debug(f"[MUX_AUDIO] Final mux failed: {result.stderr[:300]}")
+                return None
+
+        generation_logger.debug(f"[MUX_AUDIO] Successfully muxed audio onto {output_path.name}")
+        return output_path
+
+    except (subprocess.SubprocessError, OSError) as e:
+        generation_logger.debug(f"[MUX_AUDIO] Audio mux error: {e}")
+        return None
