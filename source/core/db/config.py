@@ -3,7 +3,10 @@ Database configuration: globals, constants, and debug helpers.
 
 All module-level state that other db submodules depend on lives here.
 """
+from __future__ import annotations
+
 import datetime
+from typing import Optional
 
 # Import centralized logger for system_logs visibility
 try:

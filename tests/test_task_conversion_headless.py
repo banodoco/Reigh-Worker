@@ -46,7 +46,7 @@ class TestBasicConversion:
     """Each core task type produces correct model + params."""
 
     def test_t2v_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "A beautiful sunset"},
             task_id="test-t2v-001",
@@ -58,7 +58,7 @@ class TestBasicConversion:
         assert task.id == "test-t2v-001"
 
     def test_ltx2_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "A cinematic scene"},
             task_id="test-ltx2-001",
@@ -69,7 +69,7 @@ class TestBasicConversion:
         assert task.prompt == "A cinematic scene"
 
     def test_ltxv_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Nature documentary"},
             task_id="test-ltxv-001",
@@ -79,7 +79,7 @@ class TestBasicConversion:
         assert task.model == "ltxv_13B"
 
     def test_i2v_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Zoom into the scene", "resolution": "1280x720"},
             task_id="test-i2v-001",
@@ -90,7 +90,7 @@ class TestBasicConversion:
         assert task.parameters.get("resolution") == "1280x720"
 
     def test_vace_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "A forest path"},
             task_id="test-vace-001",
@@ -100,7 +100,7 @@ class TestBasicConversion:
         assert task.model == "vace_14B_cocktail_2_2"
 
     def test_flux_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "A portrait photo"},
             task_id="test-flux-001",
@@ -110,7 +110,7 @@ class TestBasicConversion:
         assert task.model == "flux"
 
     def test_hunyuan_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "An ink painting"},
             task_id="test-hunyuan-001",
@@ -120,7 +120,7 @@ class TestBasicConversion:
         assert task.model == "hunyuan"
 
     def test_z_image_turbo_conversion(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "A quick sketch"},
             task_id="test-zimage-001",
@@ -140,7 +140,7 @@ class TestModelOverride:
     """Verify model override behavior."""
 
     def test_explicit_model_overrides_default(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test", "model": "t2v_2_2"},
             task_id="test-override-001",
@@ -150,7 +150,7 @@ class TestModelOverride:
         assert task.model == "t2v_2_2"
 
     def test_missing_model_uses_default(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test"},
             task_id="test-default-001",
@@ -168,7 +168,7 @@ class TestParameterPassthrough:
     """Verify whitelisted parameters pass through correctly."""
 
     def test_whitelisted_params_pass_through(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         params = {
             "prompt": "Test prompt",
             "resolution": "1280x720",
@@ -194,7 +194,7 @@ class TestParameterPassthrough:
         assert task.parameters["flow_shift"] == 5.0
 
     def test_steps_alias_maps_to_num_inference_steps(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test", "steps": 25},
             task_id="test-steps-001",
@@ -205,7 +205,7 @@ class TestParameterPassthrough:
 
     def test_non_whitelisted_params_filtered(self):
         """Infrastructure params like supabase_url should not leak through."""
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={
                 "prompt": "Test",
@@ -230,7 +230,7 @@ class TestDefaults:
     """Verify essential default values are applied."""
 
     def test_seed_defaults(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test"},
             task_id="test-seed-001",
@@ -240,7 +240,7 @@ class TestDefaults:
         assert task.parameters["seed"] == -1
 
     def test_negative_prompt_defaults(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test"},
             task_id="test-neg-001",
@@ -250,7 +250,7 @@ class TestDefaults:
         assert task.parameters["negative_prompt"] == ""
 
     def test_empty_prompt_raises_for_non_img2img(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         with pytest.raises(ValueError, match="prompt is required"):
             db_task_to_generation_task(
                 db_task_params={"prompt": ""},
@@ -261,7 +261,7 @@ class TestDefaults:
 
     def test_empty_prompt_allowed_for_img2img(self):
         """img2img tasks (z_image_turbo_i2i, qwen_image_edit, etc.) allow empty prompts."""
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
 
         # z_image_turbo_i2i needs an image URL; mock requests (imported inside
         # the handler) and PIL.Image.open to avoid network and file I/O.
@@ -316,7 +316,7 @@ class TestPhaseConfigIntegration:
         }
 
     def test_phase_config_sets_steps(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         pc = self._make_phase_config(num_phases=2, steps=[20, 10])
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test", "phase_config": pc},
@@ -327,7 +327,7 @@ class TestPhaseConfigIntegration:
         assert task.parameters["num_inference_steps"] == 30  # 20 + 10
 
     def test_phase_config_sets_guidance_phases(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         pc = self._make_phase_config(num_phases=3, steps=[10, 10, 10])
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test", "phase_config": pc},
@@ -341,7 +341,7 @@ class TestPhaseConfigIntegration:
         assert task.parameters["guidance3_scale"] == 1.0
 
     def test_phase_config_sets_flow_shift(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         pc = self._make_phase_config(num_phases=2, steps=[15, 15])
         pc["flow_shift"] = 12.0
         task = db_task_to_generation_task(
@@ -353,7 +353,7 @@ class TestPhaseConfigIntegration:
         assert task.parameters["flow_shift"] == 12.0
 
     def test_phase_config_with_loras(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         pc = self._make_phase_config(num_phases=2, steps=[15, 15])
         pc["phases"][0]["loras"] = [{"url": "https://example.com/lora1.safetensors", "multiplier": "1.2"}]
         pc["phases"][1]["loras"] = [{"url": "https://example.com/lora1.safetensors", "multiplier": "0.5"}]
@@ -369,7 +369,7 @@ class TestPhaseConfigIntegration:
         assert "1.2;0.5" in task.parameters.get("loras_multipliers", "")
 
     def test_invalid_phase_count_raises(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         pc = {
             "num_phases": 4,
             "steps_per_phase": [5, 5, 5, 5],
@@ -399,7 +399,7 @@ class TestParsePhaseConfig:
     """Direct tests on the parse_phase_config function."""
 
     def test_basic_2_phase(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         result = parse_phase_config(
             phase_config={
                 "num_phases": 2,
@@ -421,7 +421,7 @@ class TestParsePhaseConfig:
         assert result["switch_threshold"] is not None
 
     def test_basic_3_phase(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         result = parse_phase_config(
             phase_config={
                 "num_phases": 3,
@@ -442,7 +442,7 @@ class TestParsePhaseConfig:
         assert result["switch_threshold2"] is not None
 
     def test_unipc_solver(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         result = parse_phase_config(
             phase_config={
                 "num_phases": 2,
@@ -461,7 +461,7 @@ class TestParsePhaseConfig:
         assert result["switch_threshold"] is not None
 
     def test_dpm_solver(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         result = parse_phase_config(
             phase_config={
                 "num_phases": 2,
@@ -480,7 +480,7 @@ class TestParsePhaseConfig:
         assert result["switch_threshold"] is not None
 
     def test_steps_mismatch_raises(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         with pytest.raises(ValueError, match="steps_per_phase.*sum to"):
             parse_phase_config(
                 phase_config={
@@ -498,7 +498,7 @@ class TestParsePhaseConfig:
             )
 
     def test_lora_deduplication(self):
-        from source.task_conversion import parse_phase_config
+        from source.task_handlers.tasks.task_conversion import parse_phase_config
         result = parse_phase_config(
             phase_config={
                 "num_phases": 2,
@@ -534,7 +534,7 @@ class TestOrchestratorPriority:
     """Verify orchestrator tasks get priority boost."""
 
     def test_normal_task_default_priority(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test"},
             task_id="test-priority-001",
@@ -544,7 +544,7 @@ class TestOrchestratorPriority:
         assert task.priority == 0
 
     def test_explicit_priority_passed_through(self):
-        from source.task_conversion import db_task_to_generation_task
+        from source.task_handlers.tasks.task_conversion import db_task_to_generation_task
         task = db_task_to_generation_task(
             db_task_params={"prompt": "Test", "priority": 5},
             task_id="test-priority-002",

@@ -31,21 +31,21 @@ class TestTaskTypeIntegrity:
     """Verify exact sizes of the task-type sets and model mapping."""
 
     def test_direct_queue_count(self):
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
         assert len(DIRECT_QUEUE_TASK_TYPES) == 22, (
             f"DIRECT_QUEUE_TASK_TYPES has {len(DIRECT_QUEUE_TASK_TYPES)} entries, expected 22. "
             f"Contents: {sorted(DIRECT_QUEUE_TASK_TYPES)}"
         )
 
     def test_wgp_task_count(self):
-        from source.task_types import WGP_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
         assert len(WGP_TASK_TYPES) == 20, (
             f"WGP_TASK_TYPES has {len(WGP_TASK_TYPES)} entries, expected 20. "
             f"Contents: {sorted(WGP_TASK_TYPES)}"
         )
 
     def test_model_mapping_count(self):
-        from source.task_types import TASK_TYPE_TO_MODEL
+        from source.task_handlers.tasks.task_types import TASK_TYPE_TO_MODEL
         assert len(TASK_TYPE_TO_MODEL) >= 24, (
             f"TASK_TYPE_TO_MODEL has {len(TASK_TYPE_TO_MODEL)} entries, expected >= 24. "
             f"Keys: {sorted(TASK_TYPE_TO_MODEL.keys())}"
@@ -61,7 +61,7 @@ class TestSetConsistency:
 
     def test_wgp_minus_direct_is_inpaint_frames(self):
         """WGP has 'inpaint_frames' which is NOT in DIRECT_QUEUE (it's orchestrated)."""
-        from source.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
         wgp_only = WGP_TASK_TYPES - DIRECT_QUEUE_TASK_TYPES
         assert "inpaint_frames" in wgp_only, (
             f"Expected 'inpaint_frames' in WGP-only set, got: {wgp_only}"
@@ -69,7 +69,7 @@ class TestSetConsistency:
 
     def test_direct_minus_wgp_is_qwen_extras(self):
         """DIRECT has extra Qwen variants not in WGP."""
-        from source.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
         direct_only = DIRECT_QUEUE_TASK_TYPES - WGP_TASK_TYPES
         expected_extras = {"qwen_image_hires", "qwen_image", "qwen_image_2512"}
         assert direct_only == expected_extras, (
@@ -78,7 +78,7 @@ class TestSetConsistency:
 
     def test_all_direct_types_have_model_mapping(self):
         """Every DIRECT_QUEUE task type must have an explicit model mapping."""
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES, TASK_TYPE_TO_MODEL
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES, TASK_TYPE_TO_MODEL
         missing = [t for t in DIRECT_QUEUE_TASK_TYPES if t not in TASK_TYPE_TO_MODEL]
         assert not missing, (
             f"These DIRECT_QUEUE types lack an explicit model mapping: {missing}"
@@ -86,7 +86,7 @@ class TestSetConsistency:
 
     def test_no_direct_type_uses_fallback(self):
         """No DIRECT_QUEUE task should fall through to the 't2v' fallback."""
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES, get_default_model, TASK_TYPE_TO_MODEL
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES, get_default_model, TASK_TYPE_TO_MODEL
         fallbacks = [
             t for t in DIRECT_QUEUE_TASK_TYPES
             if t not in TASK_TYPE_TO_MODEL
@@ -122,7 +122,7 @@ class TestHandlerCoverage:
 
     def test_all_non_direct_types_have_handlers(self):
         """All 14 expected handler types must appear in task_registry.py."""
-        registry_src = (PROJECT_ROOT / "source" / "task_registry.py").read_text()
+        registry_src = (PROJECT_ROOT / "source" / "task_handlers" / "tasks" / "task_registry.py").read_text()
         missing = [h for h in self.EXPECTED_HANDLER_TYPES if f'"{h}"' not in registry_src]
         assert not missing, (
             f"Handler types missing from task_registry.py: {missing}"
@@ -132,7 +132,7 @@ class TestHandlerCoverage:
     def test_no_handler_overlaps_direct_queue(self):
         """Handler types must not also be in DIRECT_QUEUE_TASK_TYPES
         (except inpaint_frames which appears in both WGP and handlers)."""
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
         overlap = self.EXPECTED_HANDLER_TYPES & DIRECT_QUEUE_TASK_TYPES
         assert not overlap, (
             f"These handler types also appear in DIRECT_QUEUE_TASK_TYPES: {overlap}. "

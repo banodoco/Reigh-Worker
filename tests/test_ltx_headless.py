@@ -107,15 +107,15 @@ class TestLTXvTaskTypes:
     """Verify LTXv task type registrations."""
 
     def test_ltxv_in_wgp(self):
-        from source.task_types import WGP_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
         assert "ltxv" in WGP_TASK_TYPES
 
     def test_ltxv_in_direct_queue(self):
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
         assert "ltxv" in DIRECT_QUEUE_TASK_TYPES
 
     def test_ltxv_model_mapping(self):
-        from source.task_types import get_default_model
+        from source.task_handlers.tasks.task_types import get_default_model
         assert get_default_model("ltxv") == "ltxv_13B"
 
     def test_ltxv_config_exists(self):
