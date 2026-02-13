@@ -70,6 +70,10 @@ class TravelSegmentProcessor:
         travel_logger.debug(f"[VACE_DEBUG] Seg {self.ctx.segment_idx}: Model '{self.ctx.model_name}' -> is_vace_model = {is_vace}", task_id=self.ctx.task_id)
         return is_vace
 
+    def _is_ltx2_model(self) -> bool:
+        """Detect if this is an LTX-2 model."""
+        return "ltx2" in self.ctx.model_name.lower()
+
     def create_guide_video(self) -> Optional[Path]:
         """Create guide video for VACE models or debug mode.
 
@@ -130,6 +134,26 @@ class TravelSegmentProcessor:
             video_prompt_type_str = "".join(vpt_components)
             travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: VACE PATH RESULT: video_prompt_type = '{video_prompt_type_str}'", task_id=ctx.task_id)
             travel_logger.debug(f"[VACEActivated] Seg {ctx.segment_idx}: Final video_prompt_type: '{video_prompt_type_str}'", task_id=ctx.task_id)
+        elif self._is_ltx2_model():
+            travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: ENTERING LTX-2 MODEL PATH", task_id=ctx.task_id)
+            # LTX-2 supports TSEV: T=text, S=start image, E=end image, V=video guide
+            # Use guide_preprocessing from orchestrator if a guide video is provided
+            if mask_video_path:
+                # LTX-2 supports mask preprocessing (A, NA, XA, XNA)
+                video_prompt_type_str = "VG" + "M" if mask_video_path else "VG"
+                travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: LTX-2 with guide+mask", task_id=ctx.task_id)
+            else:
+                # No guide video — use start image mode for keyframe-based generation
+                video_prompt_type_str = "S"
+                travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: LTX-2 start-image mode", task_id=ctx.task_id)
+
+            # Allow orchestrator to override via explicit guide_preprocessing
+            guide_preprocessing = ctx.orchestrator_details.get("guide_preprocessing")
+            if guide_preprocessing:
+                video_prompt_type_str = guide_preprocessing
+                travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: Using explicit guide_preprocessing: {guide_preprocessing}", task_id=ctx.task_id)
+
+            travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: LTX-2 PATH RESULT: video_prompt_type = '{video_prompt_type_str}'", task_id=ctx.task_id)
         else:
             travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: ENTERING NON-VACE MODEL PATH", task_id=ctx.task_id)
             # Fallback for non-VACE models: use 'U' for unprocessed RGB to provide direct pixel-level control.

@@ -23,7 +23,7 @@ WGP_TASK_TYPES: FrozenSet[str] = frozenset({
     # Image-to-video models
     "i2v", "i2v_22",
     # Other video models
-    "hunyuan", "ltxv",
+    "hunyuan", "ltxv", "ltx2",
     # Qwen image tasks
     "qwen_image_edit", "qwen_image_style", "image_inpaint", "annotated_image_edit",
     # Specialized handlers that enqueue WGP tasks
@@ -50,7 +50,7 @@ DIRECT_QUEUE_TASK_TYPES: FrozenSet[str] = frozenset({
     # Image-to-video models
     "i2v", "i2v_22",
     # Other video models
-    "hunyuan", "ltxv",
+    "hunyuan", "ltxv", "ltx2",
     # Generic generation
     "generate_video",
     # Qwen image tasks
@@ -87,6 +87,7 @@ TASK_TYPE_TO_MODEL: Dict[str, str] = {
     # Other video models
     "hunyuan": "hunyuan",
     "ltxv": "ltxv_13B",
+    "ltx2": "ltx2_19B",
     # Segment/inpaint handlers (use lightning baseline)
     "join_clips_segment": "wan_2_2_vace_lightning_baseline_2_2_2",
     "inpaint_frames": "wan_2_2_vace_lightning_baseline_2_2_2",

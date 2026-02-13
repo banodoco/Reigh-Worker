@@ -163,6 +163,7 @@ def cleanup_legacy_lora_collisions():
         wan_dir / "loras_flux",
         wan_dir / "loras_qwen",
         wan_dir / "loras_ltxv",
+        wan_dir / "loras" / "ltx2",
         wan_dir / "loras_kandinsky5",
         # Parent directory (for stray files from previous bugs)
         repo_root / "loras",
