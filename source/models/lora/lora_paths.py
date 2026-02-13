@@ -31,6 +31,7 @@ def get_lora_search_dirs(wan_dir: Path, repo_root: Path = None) -> List[Path]:
         wan_dir / "loras_flux",
         wan_dir / "loras_qwen",
         wan_dir / "loras_ltxv",
+        wan_dir / "loras" / "ltx2",
         wan_dir / "loras_kandinsky5",
     ]
 
@@ -84,6 +85,10 @@ def get_lora_dir_for_model(model_type: str, wan_dir: Path) -> Path:
     # LTXV models
     if "ltxv" in model_lower:
         return wan_dir / "loras_ltxv"
+
+    # LTX-2 models
+    if "ltx2" in model_lower:
+        return wan_dir / "loras" / "ltx2"
 
     # Kandinsky models
     if "kandinsky" in model_lower:
