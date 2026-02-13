@@ -14,6 +14,7 @@ from ...utils import (
     snap_resolution_to_model_grid,
     upload_and_get_final_output_location,
     get_video_frame_count_and_fps)
+from ...utils.resolution_utils import get_model_grid_size
 from ...core.params.structure_guidance import StructureGuidanceConfig
 from ...core.params.task_result import TaskResult
 
@@ -22,6 +23,47 @@ from .debug_utils import log_ram_usage
 
 # Default seed used when no seed_base is provided in the orchestrator payload
 DEFAULT_SEED_BASE = 12345
+
+
+def _get_model_fps(model_name: str | None) -> int:
+    """Get the native FPS for a model (e.g. 16 for Wan, 24 for LTX-2).
+
+    Queries WGP's model definition when available, falls back to 24.
+    """
+    if not model_name:
+        return 24
+    try:
+        from wgp import get_model_fps
+        return get_model_fps(model_name)
+    except (ImportError, TypeError, ValueError, KeyError):
+        # Heuristic fallback
+        if "ltx2" in model_name.lower():
+            return 24
+        return 24
+
+
+def _get_frame_step(model_name: str | None) -> int:
+    """Get the frame quantization step for a model (e.g. 4 for Wan, 8 for LTX-2).
+
+    Queries WGP's model definition when available, falls back to 4 (Wan default).
+    """
+    if not model_name:
+        return 4
+    try:
+        from wgp import get_model_min_frames_and_step
+        _min_frames, frames_step, _latent_size = get_model_min_frames_and_step(model_name)
+        return frames_step
+    except (ImportError, TypeError, ValueError, KeyError):
+        return 4
+
+
+def _quantize_frames(frames: int, step: int) -> int:
+    """Quantize a frame count down to the nearest valid step*N+1 value.
+
+    E.g. for step=4: valid values are 1, 5, 9, 13, ...
+    For step=8: valid values are 1, 9, 17, 25, ...
+    """
+    return ((frames - 1) // step) * step + 1
 # Offset added to the base seed to derive a deterministic but distinct seed for upscaling
 UPSCALE_SEED_OFFSET = 5000
 
@@ -44,6 +86,16 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         # Validate required keys are present before proceeding
         from source.core.params.contracts import validate_orchestrator_details
         validate_orchestrator_details(orchestrator_payload, context="travel_orchestrator", task_id=orchestrator_task_id_str)
+
+        # Determine frame quantization step for this model (e.g. 4 for Wan, 8 for LTX-2)
+        frame_step = _get_frame_step(orchestrator_payload.get("model_name"))
+        travel_logger.debug(f"Frame quantization step: {frame_step} (model: {orchestrator_payload.get('model_name')})", task_id=orchestrator_task_id_str)
+
+        # Set fps_helpers from model native FPS if not explicitly provided
+        if "fps_helpers" not in orchestrator_payload:
+            model_fps = _get_model_fps(orchestrator_payload.get("model_name"))
+            orchestrator_payload["fps_helpers"] = model_fps
+            travel_logger.debug(f"Set fps_helpers={model_fps} from model native FPS", task_id=orchestrator_task_id_str)
 
         # Normalize chain_segments: true = chain segments together (default), false = keep separate
         chain_segments_raw = orchestrator_payload.get("chain_segments", True)
@@ -105,6 +157,19 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         # In those cases, the orchestrator should be considered complete once all segments complete.
         travel_mode = orchestrator_payload.get("model_type", "vace")
         use_svi = bool(orchestrator_payload.get("use_svi", False))
+
+        # SVI is not compatible with LTX-2: it uses Wan-specific LoRAs and
+        # destructively patches the model's native sliding window settings.
+        _model_name_lower = (orchestrator_payload.get("model_name") or "").lower()
+        if use_svi and "ltx2" in _model_name_lower:
+            travel_logger.warning(
+                "SVI mode requested but not supported for LTX-2 models — disabling. "
+                "LTX-2 uses native sliding window instead.",
+                task_id=orchestrator_task_id_str,
+            )
+            use_svi = False
+            orchestrator_payload["use_svi"] = False
+
         chain_segments = bool(orchestrator_payload.get("chain_segments", True))
         should_create_stitch = bool(
             use_svi
@@ -446,7 +511,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     # Current video is full, finalize it and start new one
                     final_frame = video_keyframes[-1]
                     raw_length = final_frame - video_start + 1
-                    quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                    quantized_length = _quantize_frames(raw_length, frame_step)
                     optimized_segments.append(quantized_length)
                     optimized_prompts.append(original_base_prompts[0])
 
@@ -476,7 +541,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
             # Finalize the last video
             final_frame = video_keyframes[-1]
             raw_length = final_frame - video_start + 1
-            quantized_length = ((raw_length - 1) // 4) * 4 + 1
+            quantized_length = _quantize_frames(raw_length, frame_step)
             optimized_segments.append(quantized_length)
             optimized_prompts.append(original_base_prompts[0])
 
@@ -579,7 +644,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     # Convert absolute keyframe positions to relative positions for this video
                     # BUT: adjust for quantization - keyframes must fit within quantized segment bounds
                     raw_length = final_frame - video_start + 1
-                    quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                    quantized_length = _quantize_frames(raw_length, frame_step)
 
                     relative_keyframes = []
                     for kf_abs_pos in video_keyframes:
@@ -610,7 +675,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 # Adjust for quantization like the consolidation logic does
                 final_frame = video_keyframes[-1]
                 raw_length = final_frame - video_start + 1
-                quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                quantized_length = _quantize_frames(raw_length, frame_step)
 
                 relative_keyframes = []
                 for kf_abs_pos in video_keyframes:
@@ -638,7 +703,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
             return orchestrator_payload
 
         # --- SM_QUANTIZE_FRAMES_AND_OVERLAPS ---
-        # Adjust all segment lengths to match model constraints (4*N+1 format).
+        # Adjust all segment lengths to match model constraints (step*N+1 format).
         # Then, adjust overlap values to be even and not exceed the length of the
         # smaller of the two segments they connect. This prevents errors downstream
         # in guide video creation, generation, and stitching.
@@ -650,11 +715,11 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         quantized_segment_frames = []
         travel_logger.debug(f"Orchestrator: Quantizing frame counts. Original segment_frames_expanded: {expanded_segment_frames}")
         for i, frames in enumerate(expanded_segment_frames):
-            # Quantize to 4*N+1 format to match model constraints, applied later in worker.py
-            new_frames = (frames // 4) * 4 + 1
-            travel_logger.debug(f"[FRAME_DEBUG] Segment {i}: {frames} -> {new_frames} (4*N+1 quantization)")
+            # Quantize to step*N+1 format to match model constraints (e.g. 4N+1 for Wan, 8N+1 for LTX-2)
+            new_frames = _quantize_frames(frames, frame_step)
+            travel_logger.debug(f"[FRAME_DEBUG] Segment {i}: {frames} -> {new_frames} ({frame_step}N+1 quantization)")
             if new_frames != frames:
-                travel_logger.debug(f"Orchestrator: Quantized segment {i} length from {frames} to {new_frames} (4*N+1 format).")
+                travel_logger.debug(f"Orchestrator: Quantized segment {i} length from {frames} to {new_frames} ({frame_step}*N+1 format).")
             quantized_segment_frames.append(new_frames)
         
         travel_logger.debug(f"[FRAME_DEBUG] Quantized segment_frames: {quantized_segment_frames}")
@@ -933,9 +998,10 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     parsed_res = parse_resolution(target_resolution_raw)
                     if parsed_res is None:
                         raise ValueError(f"Invalid resolution format: {target_resolution_raw}")
-                    target_resolution = snap_resolution_to_model_grid(parsed_res)
+                    grid_size = get_model_grid_size(orchestrator_payload.get("model_name"))
+                    target_resolution = snap_resolution_to_model_grid(parsed_res, grid_size)
                     orchestrator_payload["parsed_resolution_wh"] = f"{target_resolution[0]}x{target_resolution[1]}"
-                    travel_logger.debug(f"[STRUCTURE_VIDEO] Resolution snapped: {target_resolution_raw} → {orchestrator_payload['parsed_resolution_wh']}")
+                    travel_logger.debug(f"[STRUCTURE_VIDEO] Resolution snapped (grid={grid_size}): {target_resolution_raw} → {orchestrator_payload['parsed_resolution_wh']}")
                 else:
                     target_resolution = target_resolution_raw
                 
@@ -1033,7 +1099,8 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     parsed_res = parse_resolution(target_resolution_raw)
                     if parsed_res is None:
                         raise ValueError(f"Invalid resolution format: {target_resolution_raw}")
-                    target_resolution = snap_resolution_to_model_grid(parsed_res)
+                    grid_size = get_model_grid_size(orchestrator_payload.get("model_name"))
+                    target_resolution = snap_resolution_to_model_grid(parsed_res, grid_size)
                     orchestrator_payload["parsed_resolution_wh"] = f"{target_resolution[0]}x{target_resolution[1]}"
                 else:
                     target_resolution = target_resolution_raw
@@ -1516,15 +1583,15 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 else:
                     travel_logger.debug(f"[CONTEXT_FRAMES] Segment {idx}: base={base_segment_frames}, no context needed")
             
-            # Ensure frame count is valid 4N+1 (VAE temporal quantization requirement)
+            # Ensure frame count is valid step*N+1 (VAE temporal quantization requirement)
             # Invalid counts cause mask/guide vs output frame count mismatches
-            if (segment_frames_target_with_context - 1) % 4 != 0:
+            if (segment_frames_target_with_context - 1) % frame_step != 0:
                 old_count = segment_frames_target_with_context
-                segment_frames_target_with_context = ((segment_frames_target_with_context - 1) // 4) * 4 + 1
-                travel_logger.debug(f"[FRAME_QUANTIZATION] Segment {idx}: {old_count} -> {segment_frames_target_with_context} (enforcing 4N+1 rule)")
+                segment_frames_target_with_context = _quantize_frames(segment_frames_target_with_context, frame_step)
+                travel_logger.debug(f"[FRAME_QUANTIZATION] Segment {idx}: {old_count} -> {segment_frames_target_with_context} (enforcing {frame_step}N+1 rule)")
             
             # Consolidated segment frame count log for easy debugging
-            travel_logger.debug(f"[SEGMENT_FRAMES] Segment {idx}: FINAL frame target = {segment_frames_target_with_context} (valid 4N+1: ✓)")
+            travel_logger.debug(f"[SEGMENT_FRAMES] Segment {idx}: FINAL frame target = {segment_frames_target_with_context} (valid {frame_step}N+1: ✓)")
 
             segment_payload = {
                 "orchestrator_task_id_ref": orchestrator_task_id_str,

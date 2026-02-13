@@ -32,6 +32,7 @@ from ...media.video import (
     extract_frames_from_video,
     create_video_from_frames_list,
     cross_fade_overlap_frames)
+from ...media.video.ffmpeg_ops import mux_audio_from_segments
 
 from .debug_utils import debug_video_analysis, log_ram_usage
 from .ffmpeg_fallback import attempt_ffmpeg_crossfade_fallback
@@ -101,7 +102,7 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
         # Placeholder - will be set from actual input video after loading
         parsed_res_wh = None
 
-        final_fps = orchestrator_details.get("fps_helpers", 16)
+        final_fps = orchestrator_details.get("fps_helpers", 24)
         # CRITICAL: Use stitch_params overlay settings, NOT the orchestrator's default!
         # For SVI mode, frame_overlap_settings_expanded contains [4, 4, ...] (SVI_STITCH_OVERLAP)
         # For VACE mode, it contains the configured overlap values
@@ -673,6 +674,23 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
                 travel_logger.debug(f"FINAL CROSS-FADE SUMMARY: Total input frames: {total_input_frames}, Total overlaps: {total_overlaps}, Expected output: {expected_output_frames}, Actual output: {actual_output_frames}, Match: {expected_output_frames == actual_output_frames}", task_id=stitch_task_id_str)
 
                 current_stitched_video_path = create_video_from_frames_list(final_stitched_frames, path_for_raw_stitched_video, final_fps, parsed_res_wh)
+
+                # Attempt to restore audio from segment videos (e.g. LTX-2 generates audio)
+                audio_output = path_for_raw_stitched_video.with_name(
+                    path_for_raw_stitched_video.stem + "_with_audio.mp4"
+                )
+                audio_result = mux_audio_from_segments(
+                    silent_video=current_stitched_video_path,
+                    segment_videos=segment_video_paths_for_stitch,
+                    output_path=audio_output,
+                    overlap_frames=actual_overlaps_for_stitching,
+                    fps=final_fps,
+                )
+                if audio_result and audio_result.exists():
+                    # Replace silent video with audio version
+                    current_stitched_video_path.unlink(missing_ok=True)
+                    audio_result.rename(current_stitched_video_path)
+                    travel_logger.debug("Audio muxed from segment videos into stitched output", task_id=stitch_task_id_str)
 
             else:
                 travel_logger.debug(f"Stitch: Using simple FFmpeg concatenation. Output to: {path_for_raw_stitched_video}", task_id=stitch_task_id_str)

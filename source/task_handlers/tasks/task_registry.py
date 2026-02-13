@@ -213,7 +213,10 @@ def _resolve_generation_inputs(ctx: SegmentContext, task_id: str, main_output_di
     parsed_res_raw = parse_resolution(parsed_res_wh_str)
     if parsed_res_raw is None:
         raise ValueError(f"Travel segment {task_id}: Invalid resolution format {parsed_res_wh_str}")
-    parsed_res_wh = snap_resolution_to_model_grid(parsed_res_raw)
+    from source.utils.resolution_utils import get_model_grid_size
+    model_name = segment_params.get("model_name") or orchestrator_details.get("model_name")
+    grid_size = get_model_grid_size(model_name)
+    parsed_res_wh = snap_resolution_to_model_grid(parsed_res_raw, grid_size)
 
     # Frame count: individual_segment_params.num_frames > top-level num_frames > segment_frames_target > segment_frames_expanded[idx]
     total_frames_for_segment = (
