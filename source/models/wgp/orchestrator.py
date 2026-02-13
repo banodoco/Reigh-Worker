@@ -40,6 +40,7 @@ from source.models.wgp.generation_helpers import (
     is_model_vace as _is_model_vace_impl,
     is_flux as _is_flux_impl,
     is_t2v as _is_t2v_impl,
+    is_ltx2 as _is_ltx2_impl,
     is_qwen as _is_qwen_impl,
 )
 
@@ -361,8 +362,17 @@ class WanOrchestrator:
 
         else:
             # Provide stubbed helpers for smoke mode
-            self._get_base_model_type = lambda model_key: ("t2v" if "flux" not in (model_key or "") else "flux")
-            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else "T2V"))
+            def _smoke_get_base_model_type(model_key):
+                mk = (model_key or "").lower()
+                if "flux" in mk:
+                    return "flux"
+                if mk.startswith("ltx2"):
+                    return "ltx2_19B"
+                if mk.startswith("qwen"):
+                    return "qwen"
+                return "t2v"
+            self._get_base_model_type = _smoke_get_base_model_type
+            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else ("LTX2" if "ltx2" in (model_key or "").lower() else "T2V")))
             self._test_vace_module = lambda model_name: ("vace" in (model_name or ""))
         self.current_model = None
         self.offloadobj = None  # Store WGP's offload object
@@ -417,6 +427,10 @@ class WanOrchestrator:
     def _is_qwen(self) -> bool:
         """Check if current model is a Qwen image model. Delegates to source.models.wgp.generation_helpers."""
         return _is_qwen_impl(self)
+
+    def _is_ltx2(self) -> bool:
+        """Check if current model is an LTX-2 model. Delegates to source.models.wgp.generation_helpers."""
+        return _is_ltx2_impl(self)
 
     def _get_or_load_uni3c_controlnet(self):
         """Get cached Uni3C controlnet. Delegates to source.models.wgp.model_ops."""
@@ -537,6 +551,57 @@ class WanOrchestrator:
             if debug_mode:
                 generation_logger.warning(f"[SVI_GROUND_TRUTH] Exception while converting image_refs_paths -> image_refs: {e_refs}")
 
+        # ------------------------------------------------------------------
+        # LTX-2 Image / Audio Parameter Bridging
+        # ------------------------------------------------------------------
+        try:
+            from PIL import Image as _PILImage, ImageOps as _ImageOps
+
+            # start_image → image_start (PIL)
+            _si = kwargs.pop("start_image", None)
+            if _si and isinstance(_si, str) and "image_start" not in kwargs:
+                try:
+                    _img = _PILImage.open(_si).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_start"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted start_image path → image_start PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load start_image '{_si}': {_e}")
+
+            # end_image → image_end (PIL)
+            _ei = kwargs.pop("end_image", None)
+            if _ei and isinstance(_ei, str) and "image_end" not in kwargs:
+                try:
+                    _img = _PILImage.open(_ei).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_end"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted end_image path → image_end PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load end_image '{_ei}': {_e}")
+
+            # audio_input → audio_guide
+            _ai = kwargs.pop("audio_input", None)
+            if _ai and isinstance(_ai, str) and "audio_guide" not in kwargs:
+                kwargs["audio_guide"] = _ai
+                generation_logger.info(f"[LTX2_BRIDGE] Mapped audio_input → audio_guide: {_ai}")
+
+            # Auto-detect image_prompt_type for LTX-2 when not explicitly set
+            base_type_check = (self._get_base_model_type(self.current_model) or "").lower()
+            if base_type_check.startswith("ltx2") and "image_prompt_type" not in kwargs:
+                has_start = kwargs.get("image_start") is not None
+                has_end = kwargs.get("image_end") is not None
+                if has_start and has_end:
+                    kwargs["image_prompt_type"] = "TSE"
+                elif has_start:
+                    kwargs["image_prompt_type"] = "TS"
+                elif has_end:
+                    kwargs["image_prompt_type"] = "TE"
+                else:
+                    kwargs["image_prompt_type"] = "T"
+                generation_logger.info(f"[LTX2_BRIDGE] Auto-detected image_prompt_type='{kwargs['image_prompt_type']}' (start={has_start}, end={has_end})")
+        except ImportError:
+            pass  # PIL not available yet; images handled downstream
+
         # Smoke-mode short-circuit: create a sample output and return its path
         if self.smoke_mode:
             from pathlib import Path
@@ -619,8 +684,9 @@ class WanOrchestrator:
         is_flux = self._is_flux()
         is_qwen = self._is_qwen()
         is_t2v = self._is_t2v()
-        
-        generation_logger.debug(f"Model detection - VACE: {is_vace}, Flux: {is_flux}, T2V: {is_t2v}")
+        is_ltx2 = self._is_ltx2()
+
+        generation_logger.debug(f"Model detection - VACE: {is_vace}, Flux: {is_flux}, T2V: {is_t2v}, LTX2: {is_ltx2}")
         generation_logger.debug(f"Generation parameters - prompt: '{prompt[:50]}...', resolution: {resolution}, length: {video_length}")
         
         if is_vace:
@@ -763,9 +829,12 @@ class WanOrchestrator:
 
                 # Required parameters with defaults
                 'prompt': resolved_params.get('prompt', ''),
+                'alt_prompt': resolved_params.get('alt_prompt', ''),
                 'negative_prompt': resolved_params.get('negative_prompt', ''),
                 'resolution': resolved_params.get('resolution', '1280x720'),
                 'video_length': resolved_params.get('video_length', 81),
+                'duration_seconds': resolved_params.get('duration_seconds', 0),
+                'pause_seconds': resolved_params.get('pause_seconds', 0),
                 'batch_size': resolved_params.get('batch_size', 1),
                 'seed': resolved_params.get('seed', 42),
                 'force_fps': 'auto',
@@ -786,6 +855,7 @@ class WanOrchestrator:
 
                 # Audio parameters
                 'audio_guidance_scale': 1.0,
+                'audio_scale': resolved_params.get('audio_scale', 1.0),
                 'embedded_guidance_scale': resolved_params.get('embedded_guidance_scale', 0.0),
                 'repeat_generation': 1,
                 'multi_prompts_gen_type': 0,
@@ -801,6 +871,7 @@ class WanOrchestrator:
                 'model_mode': 0,
                 'video_source': None,
                 'keep_frames_video_source': '',
+                'input_video_strength': resolved_params.get('input_video_strength', 1.0),
                 'image_refs': None,
                 'frames_positions': '',
                 'image_guide': None,
@@ -849,6 +920,7 @@ class WanOrchestrator:
                 'prompt_enhancer': 0,
                 'min_frames_if_references': 9,
                 'override_profile': -1,
+                'override_attention': resolved_params.get('override_attention', ''),
 
                 # New v9.1 required parameters
                 'alt_guidance_scale': 0.0,
@@ -859,6 +931,12 @@ class WanOrchestrator:
                 'pace': 0.5,
                 'exaggeration': 0.5,
                 'temperature': 1.0,
+                'custom_settings': resolved_params.get('custom_settings', ''),
+                'top_k': resolved_params.get('top_k', 0),
+                'self_refiner_setting': resolved_params.get('self_refiner_setting', 0),
+                'self_refiner_plan': resolved_params.get('self_refiner_plan', ''),
+                'self_refiner_f_uncertainty': resolved_params.get('self_refiner_f_uncertainty', 0.5),
+                'self_refiner_certain_percentage': resolved_params.get('self_refiner_certain_percentage', 0.5),
                 'output_filename': '',
 
                 # Hires config for two-pass generation (qwen models)
@@ -900,9 +978,12 @@ class WanOrchestrator:
                 'state': self.state,
                 'model_type': self.current_model,
                 'prompt': resolved_params.get("prompt", prompt),
+                'alt_prompt': resolved_params.get("alt_prompt", ""),
                 'negative_prompt': resolved_params.get("negative_prompt", ""),
                 'resolution': resolved_params.get("resolution", "1280x720"),
                 'video_length': actual_video_length,
+                'duration_seconds': resolved_params.get("duration_seconds", 0),
+                'pause_seconds': resolved_params.get("pause_seconds", 0),
                 'batch_size': actual_batch_size,
                 'seed': resolved_params.get("seed", 42),
                 'force_fps': "auto",
@@ -954,6 +1035,7 @@ class WanOrchestrator:
             # Standard defaults for other parameters - extend the dictionary
             wgp_params.update({
             'audio_guidance_scale': 1.0,
+            'audio_scale': resolved_params.get("audio_scale", 1.0),
             'repeat_generation': 1,
             'multi_prompts_gen_type': 0,
             'multi_images_gen_type': 0,
@@ -974,6 +1056,7 @@ class WanOrchestrator:
             'model_mode': 0,
             'video_source': None,
             'keep_frames_video_source': "",
+            'input_video_strength': resolved_params.get("input_video_strength", 1.0),
             'keep_frames_video_guide': "",
             'video_guide_outpainting': "0 0 0 0",
             'mask_expand': 0,
@@ -1021,7 +1104,14 @@ class WanOrchestrator:
             'prompt_enhancer': 0,
             'min_frames_if_references': 9,
             'override_profile': override_profile_value,
-            
+            'override_attention': resolved_params.get("override_attention", ""),
+            'custom_settings': resolved_params.get("custom_settings", ""),
+            'top_k': resolved_params.get("top_k", 0),
+            'self_refiner_setting': resolved_params.get("self_refiner_setting", 0),
+            'self_refiner_plan': resolved_params.get("self_refiner_plan", ""),
+            'self_refiner_f_uncertainty': resolved_params.get("self_refiner_f_uncertainty", 0.5),
+            'self_refiner_certain_percentage': resolved_params.get("self_refiner_certain_percentage", 0.5),
+
             # Mode and filename
             'mode': "generate",
             'model_filename': "",
