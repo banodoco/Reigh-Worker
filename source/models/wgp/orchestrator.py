@@ -41,6 +41,7 @@ from source.models.wgp.generation_helpers import (
     is_model_vace as _is_model_vace_impl,
     is_flux as _is_flux_impl,
     is_t2v as _is_t2v_impl,
+    is_ltx2 as _is_ltx2_impl,
     is_qwen as _is_qwen_impl,
 )
 
@@ -374,8 +375,17 @@ class WanOrchestrator:
 
         else:
             # Provide stubbed helpers for smoke mode
-            self._get_base_model_type = lambda model_key: ("t2v" if "flux" not in (model_key or "") else "flux")
-            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else "T2V"))
+            def _smoke_get_base_model_type(model_key):
+                mk = (model_key or "").lower()
+                if "flux" in mk:
+                    return "flux"
+                if mk.startswith("ltx2"):
+                    return "ltx2_19B"
+                if mk.startswith("qwen"):
+                    return "qwen"
+                return "t2v"
+            self._get_base_model_type = _smoke_get_base_model_type
+            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else ("LTX2" if "ltx2" in (model_key or "").lower() else "T2V")))
             self._test_vace_module = lambda model_name: ("vace" in (model_name or ""))
         self.current_model = None
         self.offloadobj = None  # Store WGP's offload object
@@ -434,6 +444,10 @@ class WanOrchestrator:
     def _is_qwen(self) -> bool:
         """Check if current model is a Qwen image model. Delegates to source.models.wgp.generation_helpers."""
         return _is_qwen_impl(self)
+
+    def _is_ltx2(self) -> bool:
+        """Check if current model is an LTX-2 model. Delegates to source.models.wgp.generation_helpers."""
+        return _is_ltx2_impl(self)
 
     def _get_or_load_uni3c_controlnet(self):
         """Get cached Uni3C controlnet. Delegates to source.models.wgp.model_ops."""
@@ -520,6 +534,57 @@ class WanOrchestrator:
         # SVI / Image-Refs Path Bridging
         prepare_svi_image_refs(kwargs)
 
+        # ------------------------------------------------------------------
+        # LTX-2 Image / Audio Parameter Bridging
+        # ------------------------------------------------------------------
+        try:
+            from PIL import Image as _PILImage, ImageOps as _ImageOps
+
+            # start_image → image_start (PIL)
+            _si = kwargs.pop("start_image", None)
+            if _si and isinstance(_si, str) and "image_start" not in kwargs:
+                try:
+                    _img = _PILImage.open(_si).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_start"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted start_image path → image_start PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load start_image '{_si}': {_e}")
+
+            # end_image → image_end (PIL)
+            _ei = kwargs.pop("end_image", None)
+            if _ei and isinstance(_ei, str) and "image_end" not in kwargs:
+                try:
+                    _img = _PILImage.open(_ei).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_end"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted end_image path → image_end PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load end_image '{_ei}': {_e}")
+
+            # audio_input → audio_guide
+            _ai = kwargs.pop("audio_input", None)
+            if _ai and isinstance(_ai, str) and "audio_guide" not in kwargs:
+                kwargs["audio_guide"] = _ai
+                generation_logger.info(f"[LTX2_BRIDGE] Mapped audio_input → audio_guide: {_ai}")
+
+            # Auto-detect image_prompt_type for LTX-2 when not explicitly set
+            base_type_check = (self._get_base_model_type(self.current_model) or "").lower()
+            if base_type_check.startswith("ltx2") and "image_prompt_type" not in kwargs:
+                has_start = kwargs.get("image_start") is not None
+                has_end = kwargs.get("image_end") is not None
+                if has_start and has_end:
+                    kwargs["image_prompt_type"] = "TSE"
+                elif has_start:
+                    kwargs["image_prompt_type"] = "TS"
+                elif has_end:
+                    kwargs["image_prompt_type"] = "TE"
+                else:
+                    kwargs["image_prompt_type"] = "T"
+                generation_logger.info(f"[LTX2_BRIDGE] Auto-detected image_prompt_type='{kwargs['image_prompt_type']}' (start={has_start}, end={has_end})")
+        except ImportError:
+            pass  # PIL not available yet; images handled downstream
+
         # Smoke-mode short-circuit
         if self.smoke_mode:
             return self._generate_smoke(prompt)
@@ -597,6 +662,7 @@ class WanOrchestrator:
             video_prompt_type=video_prompt_type,
             control_net_weight=control_net_weight,
             control_net_weight2=control_net_weight2,
+            min_frames=17 if self._is_ltx2() else 5,
         )
         image_mode = model_params["image_mode"]
         actual_video_length = model_params["actual_video_length"]

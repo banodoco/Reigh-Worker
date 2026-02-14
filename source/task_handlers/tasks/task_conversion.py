@@ -1,4 +1,5 @@
 from source.core.log import headless_logger
+from source.core.params.phase_config_parser import parse_phase_config
 
 
 # Target megapixel count for auto-scaling img2img input images

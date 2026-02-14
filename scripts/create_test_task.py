@@ -469,6 +469,29 @@ TEST_TASKS = {
         "project_id": "ea5709f3-4592-4d5b-b9a5-87ed2ecf07c9"
     },
 
+    "ic_lora_audio_images": {
+        "description": "IC LoRA test - LTX-2 with start/end images, video conditioning, and audio",
+        "task_type": "ltx2",
+        "params": {
+            "prompt": "A cinematic scene with ambient soundtrack and depth-guided motion",
+            "model": "ltx2_19B",
+            "seed": 42,
+            "resolution": "768x512",
+            "video_length": 49,
+            "image_start": "https://wczysqzxlwdndgxitrvc.supabase.co/storage/v1/object/public/image_uploads/8a9fdac5-ed89-482c-aeca-c3dd7922d53c/41V0rWGAaFwJ4Y9AOqcVC.jpg",
+            "image_end": "https://wczysqzxlwdndgxitrvc.supabase.co/storage/v1/object/public/image_uploads/8a9fdac5-ed89-482c-aeca-c3dd7922d53c/e2699835-35d2-4547-85f5-d59219341e4d-u1_3c8779e7-54b4-436c-bfce-9eee8872e370.jpeg",
+            "image_prompt_type": "TSE",
+            "audio_guide": "https://wczysqzxlwdndgxitrvc.supabase.co/storage/v1/object/public/image_uploads/guidance-videos/onboarding/structure_video_optimized.mp4",
+            "audio_scale": 0.8,
+            "video_guide": "https://wczysqzxlwdndgxitrvc.supabase.co/storage/v1/object/public/image_uploads/guidance-videos/onboarding/structure_video_optimized.mp4",
+            "video_prompt_type": "VP",
+            "control_net_weight": 0.8,
+            "num_inference_steps": 4,
+            "guidance_scale": 1.0,
+        },
+        "project_id": "ea5709f3-4592-4d5b-b9a5-87ed2ecf07c9"
+    },
+
     "qwen_image_style": {
         "description": "Qwen image style with Lightning LoRA phases",
         "task_type": "qwen_image_style",

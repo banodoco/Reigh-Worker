@@ -32,6 +32,7 @@ from ...media.video import (
     extract_frames_from_video,
     create_video_from_frames_list,
     cross_fade_overlap_frames)
+from ...media.video.ffmpeg_ops import mux_audio_from_segments
 
 from .debug_utils import debug_video_analysis, log_ram_usage
 from .ffmpeg_fallback import attempt_ffmpeg_crossfade_fallback
@@ -101,7 +102,8 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
         # Placeholder - will be set from actual input video after loading
         parsed_res_wh = None
 
-        final_fps = orchestrator_details.get("fps_helpers", 16)
+        _is_ltx2 = orchestrator_details.get("use_ltx2", False)
+        final_fps = orchestrator_details.get("fps_helpers", 24 if _is_ltx2 else 16)
         # CRITICAL: Use stitch_params overlay settings, NOT the orchestrator's default!
         # For SVI mode, frame_overlap_settings_expanded contains [4, 4, ...] (SVI_STITCH_OVERLAP)
         # For VACE mode, it contains the configured overlap values
@@ -689,6 +691,24 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
 
         if not current_stitched_video_path or not current_stitched_video_path.exists():
             raise RuntimeError(f"Stitch: Stitching process failed, output video not found at {current_stitched_video_path}")
+
+        # --- Audio restoration: mux audio from segments onto stitched video ---
+        try:
+            audio_output = current_stitched_video_path.parent / f"{current_stitched_video_path.stem}_audio{current_stitched_video_path.suffix}"
+            muxed = mux_audio_from_segments(
+                segment_video_paths=segment_video_paths_for_stitch,
+                stitched_video_path=current_stitched_video_path,
+                overlap_frames=expanded_frame_overlaps,
+                fps=final_fps,
+                output_path=audio_output,
+            )
+            if muxed and muxed.exists():
+                # Replace stitched video with audio-muxed version
+                current_stitched_video_path.unlink()
+                muxed.rename(current_stitched_video_path)
+                travel_logger.debug(f"Stitch: Audio restored from segments", task_id=stitch_task_id_str)
+        except (OSError, ValueError, RuntimeError) as e_audio:
+            travel_logger.debug(f"Stitch: Audio restoration skipped (non-fatal): {e_audio}", task_id=stitch_task_id_str)
 
         video_path_after_optional_upscale = current_stitched_video_path
 

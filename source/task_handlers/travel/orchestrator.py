@@ -12,6 +12,7 @@ from ...core.db import config as db_config
 from ...utils import (
     parse_resolution,
     snap_resolution_to_model_grid,
+    get_model_grid_size,
     upload_and_get_final_output_location,
     get_video_frame_count_and_fps)
 from ...core.params.structure_guidance import StructureGuidanceConfig
@@ -24,6 +25,22 @@ from .debug_utils import log_ram_usage
 DEFAULT_SEED_BASE = 12345
 # Offset added to the base seed to derive a deterministic but distinct seed for upscaling
 UPSCALE_SEED_OFFSET = 5000
+
+
+def _get_model_fps(orchestrator_payload: dict) -> int:
+    """Return native FPS for the model. LTX-2 = 24, Wan = 16."""
+    return 24 if orchestrator_payload.get("use_ltx2") else 16
+
+
+def _get_frame_step(orchestrator_payload: dict) -> int:
+    """Return frame quantization step. LTX-2 = 8, Wan = 4."""
+    return 8 if orchestrator_payload.get("use_ltx2") else 4
+
+
+def _quantize_frames(raw_length: int, frame_step: int) -> int:
+    """Quantize a frame count to *frame_step*·N + 1."""
+    return ((raw_length - 1) // frame_step) * frame_step + 1
+
 
 def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_base: Path, orchestrator_task_id_str: str, orchestrator_project_id: str | None):
     travel_logger.essential("Starting travel orchestrator task", task_id=orchestrator_task_id_str)
@@ -105,9 +122,23 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         # In those cases, the orchestrator should be considered complete once all segments complete.
         travel_mode = orchestrator_payload.get("model_type", "vace")
         use_svi = bool(orchestrator_payload.get("use_svi", False))
+        use_ltx2 = bool(orchestrator_payload.get("use_ltx2", False))
+
+        # LTX-2: SVI is not supported — auto-disable
+        if use_ltx2 and use_svi:
+            travel_logger.warning("[LTX2_COMPAT] SVI not supported with LTX-2; auto-disabling")
+            use_svi = False
+            orchestrator_payload["use_svi"] = False
+
+        # Compute model-aware frame step and normalise FPS
+        frame_step = _get_frame_step(orchestrator_payload)
+        if "fps_helpers" not in orchestrator_payload:
+            orchestrator_payload["fps_helpers"] = _get_model_fps(orchestrator_payload)
+
         chain_segments = bool(orchestrator_payload.get("chain_segments", True))
         should_create_stitch = bool(
-            use_svi
+            use_ltx2
+            or use_svi
             or (travel_mode == "vace" and chain_segments)
         )
         required_stitch_count = 1 if should_create_stitch else 0
@@ -446,7 +477,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     # Current video is full, finalize it and start new one
                     final_frame = video_keyframes[-1]
                     raw_length = final_frame - video_start + 1
-                    quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                    quantized_length = _quantize_frames(raw_length, frame_step)
                     optimized_segments.append(quantized_length)
                     optimized_prompts.append(original_base_prompts[0])
 
@@ -476,7 +507,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
             # Finalize the last video
             final_frame = video_keyframes[-1]
             raw_length = final_frame - video_start + 1
-            quantized_length = ((raw_length - 1) // 4) * 4 + 1
+            quantized_length = _quantize_frames(raw_length, frame_step)
             optimized_segments.append(quantized_length)
             optimized_prompts.append(original_base_prompts[0])
 
@@ -579,7 +610,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     # Convert absolute keyframe positions to relative positions for this video
                     # BUT: adjust for quantization - keyframes must fit within quantized segment bounds
                     raw_length = final_frame - video_start + 1
-                    quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                    quantized_length = _quantize_frames(raw_length, frame_step)
 
                     relative_keyframes = []
                     for kf_abs_pos in video_keyframes:
@@ -610,7 +641,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 # Adjust for quantization like the consolidation logic does
                 final_frame = video_keyframes[-1]
                 raw_length = final_frame - video_start + 1
-                quantized_length = ((raw_length - 1) // 4) * 4 + 1
+                quantized_length = _quantize_frames(raw_length, frame_step)
 
                 relative_keyframes = []
                 for kf_abs_pos in video_keyframes:
@@ -650,11 +681,11 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         quantized_segment_frames = []
         travel_logger.debug(f"Orchestrator: Quantizing frame counts. Original segment_frames_expanded: {expanded_segment_frames}")
         for i, frames in enumerate(expanded_segment_frames):
-            # Quantize to 4*N+1 format to match model constraints, applied later in worker.py
-            new_frames = (frames // 4) * 4 + 1
-            travel_logger.debug(f"[FRAME_DEBUG] Segment {i}: {frames} -> {new_frames} (4*N+1 quantization)")
+            # Quantize to frame_step*N+1 format to match model constraints
+            new_frames = _quantize_frames(frames, frame_step)
+            travel_logger.debug(f"[FRAME_DEBUG] Segment {i}: {frames} -> {new_frames} ({frame_step}N+1 quantization)")
             if new_frames != frames:
-                travel_logger.debug(f"Orchestrator: Quantized segment {i} length from {frames} to {new_frames} (4*N+1 format).")
+                travel_logger.debug(f"Orchestrator: Quantized segment {i} length from {frames} to {new_frames} ({frame_step}N+1 format).")
             quantized_segment_frames.append(new_frames)
         
         travel_logger.debug(f"[FRAME_DEBUG] Quantized segment_frames: {quantized_segment_frames}")
@@ -933,12 +964,12 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     parsed_res = parse_resolution(target_resolution_raw)
                     if parsed_res is None:
                         raise ValueError(f"Invalid resolution format: {target_resolution_raw}")
-                    target_resolution = snap_resolution_to_model_grid(parsed_res)
+                    target_resolution = snap_resolution_to_model_grid(parsed_res, grid_size=get_model_grid_size(orchestrator_payload.get("model_name", "")))
                     orchestrator_payload["parsed_resolution_wh"] = f"{target_resolution[0]}x{target_resolution[1]}"
                     travel_logger.debug(f"[STRUCTURE_VIDEO] Resolution snapped: {target_resolution_raw} → {orchestrator_payload['parsed_resolution_wh']}")
                 else:
                     target_resolution = target_resolution_raw
-                
+
                 # Generate unique filename
                 timestamp_short = datetime.now().strftime("%H%M%S")
                 unique_suffix = uuid.uuid4().hex[:6]
@@ -1033,7 +1064,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                     parsed_res = parse_resolution(target_resolution_raw)
                     if parsed_res is None:
                         raise ValueError(f"Invalid resolution format: {target_resolution_raw}")
-                    target_resolution = snap_resolution_to_model_grid(parsed_res)
+                    target_resolution = snap_resolution_to_model_grid(parsed_res, grid_size=get_model_grid_size(orchestrator_payload.get("model_name", "")))
                     orchestrator_payload["parsed_resolution_wh"] = f"{target_resolution[0]}x{target_resolution[1]}"
                 else:
                     target_resolution = target_resolution_raw
@@ -1368,13 +1399,19 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
             travel_mode = orchestrator_payload.get("model_type", "vace")
             chain_segments = orchestrator_payload.get("chain_segments", True)
             use_svi = orchestrator_payload.get("use_svi", False)
+            use_ltx2 = orchestrator_payload.get("use_ltx2", False)
 
             # Determine dependency strictly from previously resolved actual DB IDs
             # SVI MODE: Sequential segments (each depends on previous for end frame chaining)
+            # LTX-2 MODE: Sequential segments (native keyframe anchoring, no SVI LoRAs needed)
             # I2V MODE (non-SVI): Independent segments (no dependency on previous task)
             # VACE MODE: Sequential by default (chain_segments=True), independent if chain_segments=False
 
-            if use_svi:
+            if use_ltx2:
+                # LTX-2 mode: ALWAYS sequential - each segment needs previous output for end frame
+                previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
+                dprint(f"[DEBUG_DEPENDENCY_CHAIN] Segment {idx} (LTX-2 mode): Sequential dependency on previous segment: {previous_segment_task_id}")
+            elif use_svi:
                 # SVI mode: ALWAYS sequential - each segment needs previous output for start frame
                 previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
                 travel_logger.debug(f"[DEBUG_DEPENDENCY_CHAIN] Segment {idx} (SVI mode): Sequential dependency on previous segment: {previous_segment_task_id}")
@@ -1388,8 +1425,8 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 # VACE MODE (Sequential): Dependent on previous segment
                 previous_segment_task_id = actual_segment_db_id_by_index.get(idx - 1) if idx > 0 else None
 
-            # Defensive fallback for sequential modes (SVI or VACE with chaining)
-            if (use_svi or (travel_mode == "vace" and chain_segments)):
+            # Defensive fallback for sequential modes (SVI, LTX-2, or VACE with chaining)
+            if (use_ltx2 or use_svi or (travel_mode == "vace" and chain_segments)):
                 if idx > 0 and not previous_segment_task_id:
                     fallback_prev = existing_segment_task_ids.get(idx - 1)
                     if fallback_prev:
@@ -1516,15 +1553,15 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 else:
                     travel_logger.debug(f"[CONTEXT_FRAMES] Segment {idx}: base={base_segment_frames}, no context needed")
             
-            # Ensure frame count is valid 4N+1 (VAE temporal quantization requirement)
+            # Ensure frame count is valid frame_step*N+1 (VAE temporal quantization requirement)
             # Invalid counts cause mask/guide vs output frame count mismatches
-            if (segment_frames_target_with_context - 1) % 4 != 0:
+            if (segment_frames_target_with_context - 1) % frame_step != 0:
                 old_count = segment_frames_target_with_context
-                segment_frames_target_with_context = ((segment_frames_target_with_context - 1) // 4) * 4 + 1
-                travel_logger.debug(f"[FRAME_QUANTIZATION] Segment {idx}: {old_count} -> {segment_frames_target_with_context} (enforcing 4N+1 rule)")
-            
+                segment_frames_target_with_context = _quantize_frames(segment_frames_target_with_context, frame_step)
+                travel_logger.debug(f"[FRAME_QUANTIZATION] Segment {idx}: {old_count} -> {segment_frames_target_with_context} (enforcing {frame_step}N+1 rule)")
+
             # Consolidated segment frame count log for easy debugging
-            travel_logger.debug(f"[SEGMENT_FRAMES] Segment {idx}: FINAL frame target = {segment_frames_target_with_context} (valid 4N+1: ✓)")
+            travel_logger.debug(f"[SEGMENT_FRAMES] Segment {idx}: FINAL frame target = {segment_frames_target_with_context} (valid {frame_step}N+1: ✓)")
 
             segment_payload = {
                 "orchestrator_task_id_ref": orchestrator_task_id_str,
@@ -1554,7 +1591,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 "vace_image_refs_to_prepare_by_worker": vace_refs_for_this_segment, # Already filtered for this segment
 
                 "parsed_resolution_wh": orchestrator_payload["parsed_resolution_wh"],
-                "model_name": orchestrator_payload["model_name"],
+                "model_name": "ltx2_19B" if use_ltx2 else orchestrator_payload["model_name"],
                 "seed_to_use": orchestrator_payload.get("seed_base", DEFAULT_SEED_BASE),
                 "cfg_star_switch": orchestrator_payload.get("cfg_star_switch", 0),
                 "cfg_zero_step": orchestrator_payload.get("cfg_zero_step", -1),
@@ -1577,6 +1614,8 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 
                 # SVI (Stable Video Infinity) end frame chaining
                 "use_svi": use_svi,
+                # LTX-2 native keyframe anchoring mode
+                "use_ltx2": use_ltx2,
             }
 
             # =============================================================================
@@ -1677,6 +1716,52 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 segment_payload["svi2pro"] = False
                 travel_logger.debug(f"[SVI_CONFIG] Segment {idx}: First segment - SVI disabled (use_svi=False, svi2pro=False)")
 
+            # =============================================================================
+            # LTX-2 Native Keyframe Anchoring Configuration
+            # =============================================================================
+            # LTX-2 uses native image_start / image_end conditioning instead of SVI LoRAs.
+            # Each segment gets its pair of input images as keyframe anchors.
+            if use_ltx2:
+                input_images = orchestrator_payload.get("input_image_paths_resolved", [])
+                ltx2_start_img = input_images[idx] if idx < len(input_images) else None
+                ltx2_end_img = input_images[idx + 1] if (idx + 1) < len(input_images) else None
+
+                # Determine image_prompt_type based on available anchors
+                if ltx2_start_img and ltx2_end_img:
+                    ltx2_prompt_type = "TSE"
+                elif ltx2_start_img:
+                    ltx2_prompt_type = "TS"
+                elif ltx2_end_img:
+                    ltx2_prompt_type = "TE"
+                else:
+                    ltx2_prompt_type = "T"
+
+                segment_payload["image_start"] = ltx2_start_img
+                segment_payload["image_end"] = ltx2_end_img
+                segment_payload["image_prompt_type"] = ltx2_prompt_type
+                segment_payload["audio_scale"] = orchestrator_payload.get("audio_scale", 1.0)
+
+                # Pass audio input if provided at orchestrator level
+                audio_path = orchestrator_payload.get("audio_input")
+                if audio_path:
+                    segment_payload["audio_input"] = audio_path
+
+                # LTX-2 does NOT use SVI LoRAs or SVI-specific parameters
+                segment_payload["use_svi"] = False
+                segment_payload["svi2pro"] = False
+
+                dprint(
+                    f"[LTX2_CONFIG] Segment {idx}: "
+                    f"image_prompt_type={ltx2_prompt_type}, "
+                    f"start={'set' if ltx2_start_img else 'none'}, "
+                    f"end={'set' if ltx2_end_img else 'none'}, "
+                    f"audio={'set' if audio_path else 'none'}"
+                )
+
+            # Log LoRA configuration for debugging
+            if segment_payload.get("lora_names"):
+                dprint(f"Orchestrator: Segment {idx} has {len(segment_payload['lora_names'])} LoRAs: {segment_payload['lora_names']}")
+
             # [DEEP_DEBUG] Log segment payload values AFTER creation
             travel_logger.debug(f"[ORCHESTRATOR_DEBUG] {orchestrator_task_id_str}: SEGMENT {idx} PAYLOAD CREATED")
             travel_logger.debug(f"[DEEP_DEBUG] Segment payload keys: {list(segment_payload.keys())}")
@@ -1717,7 +1802,12 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
         
         # Determine if we should create a stitch task
         should_create_stitch = False
-        if use_svi:
+        if use_ltx2:
+            # LTX-2 mode: Always create stitch task (segments are sequential with keyframe anchoring)
+            should_create_stitch = True
+            stitch_overlap_settings = [SVI_STITCH_OVERLAP] * (num_segments - 1) if num_segments > 1 else []
+            dprint(f"[STITCHING] LTX-2 mode: Creating stitch task with overlap={SVI_STITCH_OVERLAP}")
+        elif use_svi:
             # SVI mode: Always create stitch task (segments are sequential with end frame chaining)
             should_create_stitch = True
             # For SVI, use the small overlap value
@@ -1729,7 +1819,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
             stitch_overlap_settings = expanded_frame_overlap
             travel_logger.debug(f"[STITCHING] VACE sequential mode: Creating stitch task with overlaps={expanded_frame_overlap}")
         else:
-            travel_logger.debug(f"[STITCHING] Skipping stitch task creation (mode={travel_mode}, chain_segments={chain_segments}, use_svi={use_svi})")
+            travel_logger.debug(f"[STITCHING] Skipping stitch task creation (mode={travel_mode}, chain_segments={chain_segments}, use_svi={use_svi}, use_ltx2={use_ltx2})")
         
         if should_create_stitch and not stitch_already_exists:
             final_stitched_video_name = f"travel_final_stitched_{run_id}.mp4"
@@ -1766,6 +1856,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                 "poll_timeout_from_orchestrator": orchestrator_payload.get("original_common_args", {}).get("poll_timeout", 1800),
                 "orchestrator_details": orchestrator_payload,  # Canonical name
                 "use_svi": use_svi,  # Pass SVI flag to stitch task
+                "use_ltx2": use_ltx2,  # Pass LTX-2 flag to stitch task
             }
             
             # Stitch should depend on the last segment's actual DB row ID
