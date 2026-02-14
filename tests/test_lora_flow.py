@@ -8,17 +8,13 @@ Run with: python -m pytest tests/test_lora_flow.py -v
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import os
-import sys
 from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from source.task_conversion import parse_phase_config
-from source.params import TaskConfig, LoRAConfig, LoRAStatus
-from source.lora_utils import _download_lora_from_url
+from source.core.params.phase_config_parser import parse_phase_config
+from source.core.params import TaskConfig, LoRAConfig, LoRAStatus
+from source.models.lora.lora_utils import _download_lora_from_url
 
 
 class TestLoRAFlow:
@@ -192,9 +188,9 @@ class TestLoRAFlow:
         assert len(pending) == 2
         
         # 5. Mock the download step
-        with patch('source.lora_utils._download_lora_from_url') as mock_download:
+        with patch('source.models.lora.lora_utils._download_lora_from_url') as mock_download:
             # Mock returns the filename
-            mock_download.side_effect = lambda url, task_id, dprint=None: os.path.basename(url)
+            mock_download.side_effect = lambda url, task_id: os.path.basename(url)
             
             # Simulate what _convert_to_wgp_task does
             for url, mult in list(task_config.lora.get_pending_downloads().items()):
@@ -375,7 +371,7 @@ class TestFromDbTask:
         wgp = config.to_wgp_format()
         
         # _parsed_phase_config should be preserved for model patching
-        assert "_parsed_phase_config" in wgp or "phase_config" in self.TRAVEL_SEGMENT_PARAMS
+        assert "_parsed_phase_config" in wgp
     
     def test_download_failure_excludes_lora(self):
         """If download fails, LoRA should remain PENDING and be excluded from WGP."""
@@ -393,7 +389,7 @@ class TestFromDbTask:
         assert wgp["activated_loras"] == []
         
         # Validation should warn about pending downloads
-        errors = config.validate()
+        config.validate()
         # Note: validate() may or may not flag this as an error
 
 
@@ -513,7 +509,7 @@ class TestQueueIntegration:
             config.lora.mark_downloaded(url, local_filename)
         
         # Step 4: Validate
-        errors = config.validate()
+        config.validate()
         # Should have no critical errors after download
         
         # Step 5: Convert to WGP format
@@ -549,8 +545,8 @@ class TestDownloaderUtils:
         HF URLs sometimes come in as /blob/ links; we should normalize to /resolve/
         and pass the correct repo_id + filename to hf_hub_download.
         """
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "loras").mkdir(parents=True, exist_ok=True)
+        loras_dir = tmp_path / "loras"
+        loras_dir.mkdir(parents=True, exist_ok=True)
 
         called = {}
 
@@ -567,8 +563,11 @@ class TestDownloaderUtils:
 
         # Patch the import used inside _download_lora_from_url
         import huggingface_hub
-
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
+
+        # Mock path resolution so downloads go to tmp_path instead of real Wan2GP/
+        import source.models.lora.lora_paths as lora_paths
+        monkeypatch.setattr(lora_paths, "get_lora_dir_for_model", lambda model_type, wan_dir: loras_dir)
 
         url = "https://huggingface.co/org/repo/blob/main/loras/my_lora.safetensors"
         out = _download_lora_from_url(url, task_id="test")
@@ -585,7 +584,6 @@ class TestDownloaderUtils:
         When a collision-prone filename like high_noise_model.safetensors is used, we prefix the
         parent folder and remove any legacy generic file in standard lora dirs.
         """
-        monkeypatch.chdir(tmp_path)
         loras_dir = tmp_path / "loras"
         loras_dir.mkdir(parents=True, exist_ok=True)
 
@@ -598,9 +596,13 @@ class TestDownloaderUtils:
             Path(filename).write_bytes(b"new")
             return filename, None
 
-        # lora_utils imports urlretrieve directly: `from urllib.request import urlretrieve`
-        import source.lora_utils as lora_utils
+        import source.models.lora.lora_utils as lora_utils
         monkeypatch.setattr(lora_utils, "urlretrieve", fake_urlretrieve)
+
+        # Mock path resolution so downloads and cleanup use tmp_path
+        import source.models.lora.lora_paths as lora_paths
+        monkeypatch.setattr(lora_paths, "get_lora_dir_for_model", lambda model_type, wan_dir: loras_dir)
+        monkeypatch.setattr(lora_paths, "get_lora_search_dirs", lambda wan_dir, repo_root=None: [loras_dir])
 
         url = "https://example.com/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors"
         out = _download_lora_from_url(url, task_id="test")

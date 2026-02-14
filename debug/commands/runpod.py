@@ -2,7 +2,8 @@
 
 import os
 import sys
-from datetime import datetime, timezone
+
+import httpx
 from dotenv import load_dotenv
 
 
@@ -37,8 +38,8 @@ def run(client, options: dict):
         ]
         
         # Get database workers (only active/spawning to avoid fetching thousands of terminated workers)
-        active_result = client.db.supabase.table('workers').select('*').eq('status', 'active').execute()
-        spawning_result = client.db.supabase.table('workers').select('*').eq('status', 'spawning').execute()
+        active_result = client.supabase.table('workers').select('*').eq('status', 'active').execute()
+        spawning_result = client.supabase.table('workers').select('*').eq('status', 'spawning').execute()
         
         active_db_workers = (active_result.data or []) + (spawning_result.data or [])
         
@@ -109,7 +110,7 @@ def run(client, options: dict):
                     try:
                         runpod.terminate_pod(pod_id)
                         print(f"   ✅ Terminated {pod_id}")
-                    except Exception as e:
+                    except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
                         print(f"   ❌ Failed to terminate {pod_id}: {e}")
             else:
                 print(f"\n💡 To terminate orphaned pods, run:")
@@ -136,7 +137,7 @@ def run(client, options: dict):
         
         print("\n" + "=" * 80)
         
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()

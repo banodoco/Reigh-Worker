@@ -27,7 +27,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import travel constants under test
-from source.task_handlers.travel_between_images import (
+from source.task_handlers.travel.svi_config import (
     SVI_STITCH_OVERLAP,
     SVI_LORAS,
     SVI_DEFAULT_PARAMS,

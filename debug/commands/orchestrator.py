@@ -15,7 +15,7 @@ def run(client: DebugClient, options: dict):
         output = Formatter.format_orchestrator(status, format_type)
         print(output)
         
-    except Exception as e:
+    except (ImportError, ValueError, OSError) as e:
         print(f"❌ Error checking orchestrator status: {e}")
         import traceback
         if options.get('debug'):

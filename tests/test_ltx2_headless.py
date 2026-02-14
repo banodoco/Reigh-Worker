@@ -169,15 +169,15 @@ class TestLTX2TaskTypes:
     """Verify task_types.py includes ltx2 registrations."""
 
     def test_ltx2_in_wgp_task_types(self):
-        from source.task_types import WGP_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
         assert "ltx2" in WGP_TASK_TYPES
 
     def test_ltx2_in_direct_queue(self):
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
         assert "ltx2" in DIRECT_QUEUE_TASK_TYPES
 
     def test_ltx2_model_mapping(self):
-        from source.task_types import get_default_model
+        from source.task_handlers.tasks.task_types import get_default_model
         assert get_default_model("ltx2") == "ltx2_19B"
 
 

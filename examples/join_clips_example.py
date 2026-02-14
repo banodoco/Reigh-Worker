@@ -28,7 +28,7 @@ from datetime import datetime
 # Add project to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from source.task_handlers.join_clips import _handle_join_clips_task
+from source.task_handlers.join.generation import handle_join_clips_task
 
 
 def run_join_clips(
@@ -144,12 +144,11 @@ def run_join_clips(
         start_time = time.time()
 
         # Call join_clips handler directly
-        success, result = _handle_join_clips_task(
+        success, result = handle_join_clips_task(
             task_params_from_db=task_params,
             main_output_dir_base=output_dir.parent,
             task_id=task_id,
             task_queue=task_queue,
-            dprint=print
         )
 
         generation_time = time.time() - start_time
@@ -169,7 +168,8 @@ def run_join_clips(
                 import shutil
                 shutil.move(str(result_path), str(final_output))
 
-                file_size = final_output.stat().st_size / (1024 * 1024)  # MB
+                BYTES_PER_MB = 1024 * 1024
+                file_size = final_output.stat().st_size / BYTES_PER_MB  # MB
                 print(f"💾 Saved to: {final_output}")
                 print(f"📊 File size: {file_size:.1f}MB")
 
@@ -177,8 +177,8 @@ def run_join_clips(
                 try:
                     shutil.rmtree(output_dir)
                     print(f"🧹 Cleaned up temp directory")
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Warning: Failed to clean up temp directory: {e}")
 
                 print()
                 print("=" * 80)
@@ -273,7 +273,7 @@ Examples:
         try:
             w, h = map(int, args.resolution.split('x'))
             resolution = (w, h)
-        except:
+        except Exception:
             print(f"❌ Invalid resolution format: {args.resolution}")
             print("   Use format: WIDTHxHEIGHT (e.g. 1280x720)")
             return 1

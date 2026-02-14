@@ -15,7 +15,7 @@ def run(client: DebugClient, task_id: str, options: dict):
         output = Formatter.format_task(info, format_type, logs_only)
         print(output)
         
-    except Exception as e:
+    except (ImportError, ValueError, OSError) as e:
         print(f"❌ Error investigating task: {e}")
         import traceback
         if options.get('debug'):

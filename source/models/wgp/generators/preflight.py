@@ -1,0 +1,231 @@
+"""Pre-generation setup: SVI bridging, model-specific parameter configuration,
+and image input preparation.
+
+These functions run before the WGP generate_video() call to ensure all
+parameters are in the format that WGP expects.
+"""
+
+from typing import Any, Callable, Dict, Optional
+
+from source.core.log import generation_logger, is_debug_enabled
+
+
+def prepare_svi_image_refs(kwargs: dict) -> None:
+    """Convert ``image_refs_paths`` (list[str]) to PIL ``image_refs`` (in-place).
+
+    Our task pipeline passes paths for JSON-serializability, but Wan2GP/WGP
+    expects ``image_refs`` as a list of PIL.Image objects.
+    """
+    try:
+        if (
+            "image_refs_paths" in kwargs
+            and kwargs.get("image_refs") in (None, "", [])
+            and isinstance(kwargs["image_refs_paths"], (list, tuple))
+            and len(kwargs["image_refs_paths"]) > 0
+        ):
+            from PIL import Image
+            from PIL import ImageOps
+
+            refs: list = []
+            for p in kwargs["image_refs_paths"]:
+                if not p:
+                    continue
+                try:
+                    img = Image.open(str(p)).convert("RGB")
+                    img = ImageOps.exif_transpose(img)
+                    refs.append(img)
+                except (OSError, ValueError, RuntimeError) as e_img:
+                    if is_debug_enabled():
+                        generation_logger.warning(
+                            f"[SVI_GROUND_TRUTH] Failed to load image_ref path '{p}': {e_img}"
+                        )
+            if refs:
+                kwargs["image_refs"] = refs
+                if is_debug_enabled():
+                    generation_logger.info(
+                        f"[SVI_GROUND_TRUTH] Converted image_refs_paths -> image_refs (count={len(refs)})"
+                    )
+            else:
+                if is_debug_enabled():
+                    generation_logger.warning(
+                        "[SVI_GROUND_TRUTH] image_refs_paths provided but no images could be loaded"
+                    )
+    except (OSError, ValueError, RuntimeError, TypeError) as e_refs:
+        if is_debug_enabled():
+            generation_logger.warning(
+                f"[SVI_GROUND_TRUTH] Exception while converting image_refs_paths -> image_refs: {e_refs}"
+            )
+
+
+def configure_model_specific_params(
+    *,
+    is_flux: bool,
+    is_qwen: bool,
+    is_vace: bool,
+    resolved_params: dict,
+    final_video_length: int,
+    final_batch_size: int,
+    final_guidance_scale: float,
+    final_embedded_guidance: float,
+    video_guide: Optional[str],
+    video_mask: Optional[str],
+    video_prompt_type: Optional[str],
+    control_net_weight: Optional[float],
+    control_net_weight2: Optional[float],
+) -> Dict[str, Any]:
+    """Compute model-specific generation parameters.
+
+    Returns a dict with keys:
+        image_mode, actual_video_length, actual_batch_size, actual_guidance,
+        video_guide, video_mask, video_prompt_type, control_net_weight, control_net_weight2
+    """
+    if is_flux:
+        image_mode = 1
+        actual_video_length = 1
+        actual_batch_size = final_video_length
+        actual_guidance = final_embedded_guidance
+    elif is_qwen:
+        image_mode = 1
+        actual_video_length = 1
+        actual_batch_size = resolved_params.get("batch_size", 1)
+        actual_guidance = final_guidance_scale
+    else:
+        # T2V or VACE
+        image_mode = 0
+        actual_video_length = final_video_length
+
+        # Safety check: Wan models with latent_size=4 crash if video_length < 4
+        if actual_video_length < 5:
+            generation_logger.warning(
+                f"[SAFETY] Boosting video_length from {actual_video_length} to 5 "
+                "to prevent quantization crash"
+            )
+            actual_video_length = 5
+
+        actual_batch_size = final_batch_size
+        actual_guidance = final_guidance_scale
+
+    # Disable VACE controls when not applicable
+    if not is_vace and not video_guide and not video_mask:
+        video_guide = None
+        video_mask = None
+        if video_prompt_type is None or video_prompt_type == "":
+            video_prompt_type = "disabled"
+        control_net_weight = 0.0
+        control_net_weight2 = 0.0
+
+    return {
+        "image_mode": image_mode,
+        "actual_video_length": actual_video_length,
+        "actual_batch_size": actual_batch_size,
+        "actual_guidance": actual_guidance,
+        "video_guide": video_guide,
+        "video_mask": video_mask,
+        "video_prompt_type": video_prompt_type,
+        "control_net_weight": control_net_weight,
+        "control_net_weight2": control_net_weight2,
+    }
+
+
+def prepare_image_inputs(
+    wgp_params: Dict[str, Any],
+    *,
+    is_qwen: bool,
+    image_mode: int,
+    load_image_fn: Callable,
+) -> None:
+    """Load PIL images for image_start/image_end/image_guide/image_mask (in-place).
+
+    WGP expects PIL Image objects, not file paths.  This function converts
+    string paths to loaded images and handles resolution matching.
+    """
+    # Extract target resolution for resizing
+    target_width, target_height = None, None
+    if wgp_params.get('resolution'):
+        try:
+            w_str, h_str = wgp_params['resolution'].split('x')
+            target_width, target_height = int(w_str), int(h_str)
+            generation_logger.info(
+                f"[PREFLIGHT] Target resolution for image resizing: {target_width}x{target_height}"
+            )
+        except (ValueError, TypeError, AttributeError) as e_res:
+            generation_logger.warning(
+                f"[PREFLIGHT] Could not parse resolution '{wgp_params.get('resolution')}': {e_res}"
+            )
+
+    # Load image_start / image_end
+    for img_param in ('image_start', 'image_end'):
+        val = wgp_params.get(img_param)
+        if not val:
+            continue
+
+        if isinstance(val, str):
+            generation_logger.info(f"[PREFLIGHT] Loading {img_param} from path: {val}")
+            img = load_image_fn(val, mask=False)
+            if img and target_width and target_height:
+                from PIL import Image
+                if img.size != (target_width, target_height):
+                    generation_logger.info(
+                        f"[PREFLIGHT] Resizing {img_param} from "
+                        f"{img.size[0]}x{img.size[1]} to {target_width}x{target_height}"
+                    )
+                    img = img.resize((target_width, target_height), Image.LANCZOS)
+            wgp_params[img_param] = img
+
+        elif isinstance(val, list) and len(val) > 0 and isinstance(val[0], str):
+            generation_logger.info(f"[PREFLIGHT] Loading {img_param} from list of paths")
+            loaded_imgs = []
+            for p in val:
+                img = load_image_fn(p, mask=False)
+                if img and target_width and target_height:
+                    from PIL import Image
+                    if img.size != (target_width, target_height):
+                        generation_logger.info(
+                            f"[PREFLIGHT] Resizing {img_param} image from "
+                            f"{img.size[0]}x{img.size[1]} to {target_width}x{target_height}"
+                        )
+                        img = img.resize((target_width, target_height), Image.LANCZOS)
+                loaded_imgs.append(img)
+            wgp_params[img_param] = loaded_imgs
+
+    # For image-based models, load guide and mask images
+    if is_qwen or image_mode == 1:
+        if wgp_params.get('image_guide') and isinstance(wgp_params['image_guide'], str):
+            wgp_params['image_guide'] = load_image_fn(wgp_params['image_guide'], mask=False)
+        if wgp_params.get('image_mask') and isinstance(wgp_params['image_mask'], str):
+            wgp_params['image_mask'] = load_image_fn(wgp_params['image_mask'], mask=True)
+
+        # Ensure proper parameter coordination for Qwen models
+        if is_qwen:
+            if not wgp_params.get('image_mask'):
+                wgp_params['image_mask'] = None
+                generation_logger.debug("[PREFLIGHT] Ensured image_mask=None for Qwen regular generation")
+            else:
+                wgp_params['model_mode'] = 1
+                generation_logger.info("[PREFLIGHT] Set model_mode=1 for Qwen inpainting (image_mask present)")
+
+        # Preflight logs for image models
+        try:
+            ig = wgp_params.get('image_guide')
+            if ig is not None:
+                from PIL import Image as _PILImage
+                if isinstance(ig, _PILImage.Image):
+                    generation_logger.info(
+                        "[PREFLIGHT] image_guide resolved to PIL.Image with size %sx%s and mode %s"
+                        % (ig.size[0], ig.size[1], ig.mode)
+                    )
+                else:
+                    generation_logger.warning(
+                        f"[PREFLIGHT] image_guide is not a PIL image (type={type(ig)})"
+                    )
+            else:
+                generation_logger.warning("[PREFLIGHT] image_guide is None for image model")
+        except (AttributeError, TypeError) as _e:
+            generation_logger.warning(f"[PREFLIGHT] Could not inspect image_guide: {_e}")
+
+    # Sanitize image_refs: WGP expects None when there are no refs
+    try:
+        if isinstance(wgp_params.get('image_refs'), list) and len(wgp_params['image_refs']) == 0:
+            wgp_params['image_refs'] = None
+    except (TypeError, KeyError):
+        pass

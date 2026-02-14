@@ -1,17 +1,16 @@
-# source/task_handlers/__init__.py
 """Specialized task handlers for complex multi-step operations.
 
-This package contains handlers for tasks that involve multiple generation steps,
-external service calls, or complex video processing pipelines.
+Subpackages:
+- travel/: Multi-segment travel video generation with SVI chaining
+- join/: Video clip joining with AI-generated transitions
+- queue/: Task queue and worker thread management
+- tasks/: Task registry, type definitions, and conversion
+- worker/: Worker utilities, heartbeat, and fatal error handling
 
-Handlers included:
-- travel_between_images: Multi-segment travel video generation with SVI chaining
-- join_clips: Video clip joining with AI-generated transitions
-- join_clips_orchestrator: High-level coordination for join clips workflow
+Top-level handlers:
 - edit_video_orchestrator: Video editing workflow coordination
 - magic_edit: AI-powered image editing via Replicate API
 - inpaint_frames: Frame-level video inpainting using VACE
 - create_visualization: Debug visualization generation
-
-Note: This package was formerly called "sm_functions" (Steerable Motion).
+- extract_frame / rife_interpolate: Specialized single-purpose handlers
 """

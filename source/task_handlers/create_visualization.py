@@ -11,18 +11,15 @@ debug/preview videos showing the generation process with:
 import json
 import tempfile
 from pathlib import Path
-from typing import Optional
 
-from ..common_utils import prepare_output_path_with_upload
-from ..visualization_utils import create_travel_visualization
-
+from ..utils import prepare_output_path_with_upload
+from ..media.visualization.comparison import create_travel_visualization
+from source.core.log import task_logger
 
 def _handle_create_visualization_task(
     task_params_from_db: dict,
     main_output_dir_base: Path,
-    viz_task_id_str: str,
-    dprint
-) -> tuple[bool, str]:
+    viz_task_id_str: str) -> tuple[bool, str]:
     """
     Handle a 'create_visualization' task.
 
@@ -30,12 +27,11 @@ def _handle_create_visualization_task(
         task_params_from_db: Task parameters from database
         main_output_dir_base: Base directory for outputs
         viz_task_id_str: Task ID string
-        dprint: Debug print function
 
     Returns:
         Tuple of (success: bool, output_message: str)
     """
-    dprint(f"[VIZ] Starting visualization task {viz_task_id_str}")
+    task_logger.debug(f"[VIZ] Starting visualization task {viz_task_id_str}")
 
     try:
         # Extract parameters
@@ -68,11 +64,11 @@ def _handle_create_visualization_task(
         if not segment_frames:
             raise ValueError("Missing required parameter: segment_frames")
 
-        dprint(f"[VIZ] Task {viz_task_id_str}: Creating {layout} visualization")
-        dprint(f"[VIZ]   Output video: {output_video_path}")
-        dprint(f"[VIZ]   Structure video: {structure_video_path}")
-        dprint(f"[VIZ]   Input images: {len(input_image_paths)}")
-        dprint(f"[VIZ]   Segments: {len(segment_frames)}")
+        task_logger.debug(f"[VIZ] Task {viz_task_id_str}: Creating {layout} visualization")
+        task_logger.debug(f"[VIZ]   Output video: {output_video_path}")
+        task_logger.debug(f"[VIZ]   Structure video: {structure_video_path}")
+        task_logger.debug(f"[VIZ]   Input images: {len(input_image_paths)}")
+        task_logger.debug(f"[VIZ]   Segments: {len(segment_frames)}")
 
         # Create temporary output path
         temp_dir = Path(tempfile.mkdtemp(prefix=f"viz_{viz_task_id_str}_"))
@@ -94,16 +90,14 @@ def _handle_create_visualization_task(
             frame_overlaps=frame_overlaps
         )
 
-        dprint(f"[VIZ] Task {viz_task_id_str}: Visualization created at {viz_path}")
+        task_logger.debug(f"[VIZ] Task {viz_task_id_str}: Visualization created at {viz_path}")
 
         # Prepare final output path with upload
         final_path, initial_db_location = prepare_output_path_with_upload(
             filename=f"{viz_task_id_str}_visualization.mp4",
             task_id=viz_task_id_str,
             main_output_dir_base=main_output_dir_base,
-            task_type="create_visualization",
-            dprint=dprint
-        )
+            task_type="create_visualization")
 
         # Move/upload the visualization
         import shutil
@@ -111,25 +105,20 @@ def _handle_create_visualization_task(
         shutil.copy2(viz_path, final_path)
 
         # Handle upload and get final DB location
-        from ..common_utils import upload_and_get_final_output_location
+        from ..utils import upload_and_get_final_output_location
         output_location = upload_and_get_final_output_location(
             local_file_path=Path(final_path),
-            supabase_object_name=viz_task_id_str,
-            initial_db_location=initial_db_location,
-            dprint=dprint
-        )
+            initial_db_location=initial_db_location)
 
         # Cleanup temp directory
         shutil.rmtree(temp_dir, ignore_errors=True)
 
         success_msg = f"Visualization created successfully: {output_location}"
-        dprint(f"[VIZ] Task {viz_task_id_str}: {success_msg}")
+        task_logger.debug(f"[VIZ] Task {viz_task_id_str}: {success_msg}")
 
         return True, output_location
 
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, KeyError, json.JSONDecodeError) as e:
         error_msg = f"[ERROR Task ID: {viz_task_id_str}] Visualization failed: {e}"
-        dprint(error_msg)
-        import traceback
-        traceback.print_exc()
+        task_logger.debug(error_msg, exc_info=True)
         return False, error_msg

@@ -16,7 +16,7 @@ def run(client: DebugClient, options: dict):
         output = Formatter.format_workers_summary(summary, format_type)
         print(output)
         
-    except Exception as e:
+    except (ImportError, ValueError, OSError) as e:
         print(f"❌ Error analyzing workers: {e}")
         import traceback
         if options.get('debug'):

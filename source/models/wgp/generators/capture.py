@@ -1,0 +1,197 @@
+"""Output capture infrastructure for WGP generation calls.
+
+Provides stdout/stderr/logging capture so that WGP output can be inspected
+for error extraction when generation silently fails.
+"""
+
+import sys
+import logging as py_logging
+from collections import deque
+from typing import Any, Callable, Deque, Dict, Optional, Tuple
+
+
+class TailBuffer:
+    """Ring-buffer that keeps only the last *max_chars* characters."""
+
+    def __init__(self, max_chars: int):
+        self.max_chars = max_chars
+        self._buf = ""
+
+    def write(self, text: str):
+        if not text:
+            return
+        try:
+            self._buf += str(text)
+            if len(self._buf) > self.max_chars:
+                self._buf = self._buf[-self.max_chars:]
+        except (TypeError, ValueError, MemoryError):
+            # Never let logging capture break generation
+            pass
+
+    def getvalue(self) -> str:
+        return self._buf
+
+
+class TeeWriter:
+    """Tee stdout/stderr: capture while still printing to console.
+
+    Proxies common file-like attributes (encoding/isatty/fileno/etc.)
+    to avoid breaking libraries that inspect the stream object.
+    """
+
+    def __init__(self, original, capture):
+        self._original = original
+        self._capture = capture
+
+    def write(self, text):
+        try:
+            self._original.write(text)
+        except (OSError, ValueError):
+            pass
+        try:
+            self._capture.write(text)
+        except (OSError, ValueError):
+            pass
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        try:
+            self._original.flush()
+        except (OSError, ValueError):
+            pass
+
+    def isatty(self):
+        try:
+            return self._original.isatty()
+        except (OSError, ValueError):
+            return False
+
+    def fileno(self):
+        return self._original.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self._original, "encoding", None)
+
+    def __getattr__(self, name):
+        # Proxy everything else to the underlying stream
+        return getattr(self._original, name)
+
+
+class CaptureHandler(py_logging.Handler):
+    """Logging handler that stores recent records in a deque for later inspection."""
+
+    def __init__(self, log_deque: Deque):
+        super().__init__(level=py_logging.DEBUG)
+        self._log_deque = log_deque
+        self._dedupe: Deque = deque(maxlen=200)  # avoid spamming duplicates
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            key = (record.levelname, record.name, msg)
+            if key in self._dedupe:
+                return
+            self._dedupe.append(key)
+            self._log_deque.append({
+                "level": record.levelname,
+                "name": record.name,
+                "message": msg,
+            })
+        except (ValueError, TypeError, RuntimeError):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Default capture sizes
+# ---------------------------------------------------------------------------
+_CAPTURE_STDOUT_CHARS = 20_000
+_CAPTURE_STDERR_CHARS = 20_000
+_CAPTURE_PYLOG_RECORDS = 1000  # keep last N log records (all levels)
+
+
+def run_with_capture(
+    fn: Callable[..., Any],
+    **kwargs,
+) -> Tuple[Optional[Any], TailBuffer, TailBuffer, Deque[Dict[str, str]]]:
+    """Execute *fn* while capturing stdout, stderr, and Python logging.
+
+    NOTE: This monkeypatches sys.stdout/sys.stderr for the duration of the
+    call.  That is process-global and can capture output from other threads.
+    In this repo, generation is effectively single-task-at-a-time per worker
+    process, so this is acceptable.
+
+    If *fn* raises an exception, it is re-raised after capture cleanup,
+    but the captured buffers are still available via the ``captured_stdout``,
+    ``captured_stderr``, and ``captured_logs`` attributes on the exception
+    object (attached as ``__captured_stdout__`` etc.).
+
+    Returns:
+        (return_value, captured_stdout, captured_stderr, captured_logs)
+        *return_value* is whatever *fn* returns.
+
+    Raises:
+        Any exception raised by *fn*, with captured output attached.
+    """
+    captured_stdout = TailBuffer(_CAPTURE_STDOUT_CHARS)
+    captured_stderr = TailBuffer(_CAPTURE_STDERR_CHARS)
+    captured_logs: Deque[Dict[str, str]] = deque(maxlen=_CAPTURE_PYLOG_RECORDS)
+
+    # Set up capture handler on root logger + non-propagating library loggers
+    capture_handler = CaptureHandler(captured_logs)
+    capture_handler.setFormatter(py_logging.Formatter("%(levelname)s:%(name)s: %(message)s"))
+
+    root_logger = py_logging.getLogger()
+    candidate_loggers = [
+        py_logging.getLogger("diffusers"),
+        py_logging.getLogger("transformers"),
+        py_logging.getLogger("torch"),
+        py_logging.getLogger("PIL"),
+    ]
+
+    loggers_to_capture = [root_logger]
+    for lg in candidate_loggers:
+        if getattr(lg, "propagate", True) is False:
+            loggers_to_capture.append(lg)
+
+    # Store original levels and add handler
+    original_levels = {}
+    for logger in loggers_to_capture:
+        original_levels[logger.name] = logger.level
+        logger.addHandler(capture_handler)
+        if logger.level > py_logging.DEBUG:
+            logger.setLevel(py_logging.DEBUG)
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    caught_exc: Optional[BaseException] = None
+    result = None
+
+    try:
+        sys.stdout = TeeWriter(original_stdout, captured_stdout)  # type: ignore[assignment]
+        sys.stderr = TeeWriter(original_stderr, captured_stderr)  # type: ignore[assignment]
+
+        result = fn(**kwargs)
+    except BaseException as e:
+        caught_exc = e
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+        # Remove capture handler and restore levels
+        for logger in loggers_to_capture:
+            logger.removeHandler(capture_handler)
+            if logger.name in original_levels:
+                logger.setLevel(original_levels[logger.name])
+
+    if caught_exc is not None:
+        # Attach captured output to the exception so callers can inspect it
+        caught_exc.__captured_stdout__ = captured_stdout  # type: ignore[attr-defined]
+        caught_exc.__captured_stderr__ = captured_stderr  # type: ignore[attr-defined]
+        caught_exc.__captured_logs__ = captured_logs  # type: ignore[attr-defined]
+        raise caught_exc
+
+    return result, captured_stdout, captured_stderr, captured_logs

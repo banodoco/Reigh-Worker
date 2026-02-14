@@ -42,7 +42,7 @@ def run(client: DebugClient, options: dict):
         # Get active workers to check actual usage
         print("\n🔍 Checking Actual Usage via Active Workers:\n")
         
-        workers = client.db.supabase.table('workers').select('*').eq('status', 'active').execute()
+        workers = client.supabase.table('workers').select('*').eq('status', 'active').execute()
         
         if not workers.data:
             print("   No active workers to check storage via SSH")
@@ -149,7 +149,7 @@ def run(client: DebugClient, options: dict):
             else:
                 print(f"   ❌ Expansion failed!")
         
-    except Exception as e:
+    except (ImportError, ValueError, OSError) as e:
         print(f"❌ Error checking storage: {e}")
         import traceback
         if options.get('debug'):

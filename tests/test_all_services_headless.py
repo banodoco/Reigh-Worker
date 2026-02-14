@@ -91,7 +91,7 @@ class TestTaskTypeRegistration:
     }
 
     def test_all_wgp_types_present(self):
-        from source.task_types import WGP_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
         assert WGP_TASK_TYPES == self.EXPECTED_WGP, (
             f"WGP_TASK_TYPES mismatch.\n"
             f"  Missing: {self.EXPECTED_WGP - WGP_TASK_TYPES}\n"
@@ -99,7 +99,7 @@ class TestTaskTypeRegistration:
         )
 
     def test_all_direct_queue_types_present(self):
-        from source.task_types import DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
         assert DIRECT_QUEUE_TASK_TYPES == self.EXPECTED_DIRECT, (
             f"DIRECT_QUEUE_TASK_TYPES mismatch.\n"
             f"  Missing: {self.EXPECTED_DIRECT - DIRECT_QUEUE_TASK_TYPES}\n"
@@ -107,12 +107,12 @@ class TestTaskTypeRegistration:
         )
 
     def test_ltx2_in_both_sets(self):
-        from source.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
         assert "ltx2" in WGP_TASK_TYPES
         assert "ltx2" in DIRECT_QUEUE_TASK_TYPES
 
     def test_ltxv_in_both_sets(self):
-        from source.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
+        from source.task_handlers.tasks.task_types import WGP_TASK_TYPES, DIRECT_QUEUE_TASK_TYPES
         assert "ltxv" in WGP_TASK_TYPES
         assert "ltxv" in DIRECT_QUEUE_TASK_TYPES
 
@@ -153,11 +153,11 @@ class TestModelMappings:
 
     @pytest.mark.parametrize("task_type,expected_model", list(EXPECTED_MAPPINGS.items()))
     def test_model_mapping(self, task_type, expected_model):
-        from source.task_types import get_default_model
+        from source.task_handlers.tasks.task_types import get_default_model
         assert get_default_model(task_type) == expected_model
 
     def test_fallback_for_unknown_type(self):
-        from source.task_types import get_default_model
+        from source.task_handlers.tasks.task_types import get_default_model
         assert get_default_model("nonexistent_task") == "t2v"
 
 
@@ -239,22 +239,22 @@ class TestHelperFunctions:
 
     @pytest.mark.parametrize("task_type", WGP_TYPES)
     def test_is_wgp_task_positive(self, task_type):
-        from source.task_types import is_wgp_task
+        from source.task_handlers.tasks.task_types import is_wgp_task
         assert is_wgp_task(task_type) is True
 
     @pytest.mark.parametrize("task_type", NEGATIVE_TYPES)
     def test_is_wgp_task_negative(self, task_type):
-        from source.task_types import is_wgp_task
+        from source.task_handlers.tasks.task_types import is_wgp_task
         assert is_wgp_task(task_type) is False
 
     @pytest.mark.parametrize("task_type", DIRECT_TYPES)
     def test_is_direct_queue_task_positive(self, task_type):
-        from source.task_types import is_direct_queue_task
+        from source.task_handlers.tasks.task_types import is_direct_queue_task
         assert is_direct_queue_task(task_type) is True
 
     @pytest.mark.parametrize("task_type", NEGATIVE_TYPES)
     def test_is_direct_queue_task_negative(self, task_type):
-        from source.task_types import is_direct_queue_task
+        from source.task_handlers.tasks.task_types import is_direct_queue_task
         assert is_direct_queue_task(task_type) is False
 
 

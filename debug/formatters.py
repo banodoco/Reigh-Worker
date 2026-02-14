@@ -344,7 +344,6 @@ class Formatter:
             # Show each child task
             for child in info.child_tasks:
                 child_id = child['id'][:8]
-                child_type = child.get('task_type', 'unknown')
                 child_status = child.get('status', 'unknown')
                 child_attempts = child.get('attempts', 0)
                 
@@ -354,7 +353,7 @@ class Formatter:
                     import json
                     try:
                         child_params = json.loads(child_params)
-                    except:
+                    except Exception:
                         child_params = {}
                 seg_idx = child_params.get('segment_index', '-')
                 
@@ -405,25 +404,21 @@ class Formatter:
         return "\n".join(lines)
     
     @staticmethod
-    def _format_task_logs_only(info: TaskInfo) -> str:
-        """Format only the task logs timeline."""
-        lines = []
-        
-        lines.append(f"📜 Event Timeline for Task: {info.task_id}")
-        lines.append("=" * 80)
-        
-        if not info.logs:
+    def _format_logs_timeline(entity_type: str, entity_id: str, logs: list) -> str:
+        """Format a logs timeline for any entity (task, worker, etc.)."""
+        lines = [f"📜 Event Timeline for {entity_type}: {entity_id}", "=" * 80]
+        if not logs:
             lines.append("No logs found")
             return "\n".join(lines)
-        
-        for log in info.logs:
+        for log in logs:
             timestamp = log['timestamp'][11:19] if len(log['timestamp']) >= 19 else log['timestamp']
-            level = log['log_level']
-            message = log['message']
-            
-            lines.append(f"[{timestamp}] [{level:8}] {message}")
-        
+            lines.append(f"[{timestamp}] [{log['log_level']:8}] {log['message']}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_task_logs_only(info: TaskInfo) -> str:
+        """Format only the task logs timeline."""
+        return Formatter._format_logs_timeline("Task", info.task_id, info.logs)
     
     # ==================== WORKER FORMATTING ====================
     
@@ -464,7 +459,7 @@ class Formatter:
                 created = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                 age_minutes = (now - created).total_seconds() / 60
                 lines.append(f"   Created: {created_at} (age: {age_minutes:.1f}m)")
-            except:
+            except Exception:
                 lines.append(f"   Created: {created_at}")
         
         last_hb = worker.get('last_heartbeat')
@@ -481,7 +476,7 @@ class Formatter:
                     status = '❌ STALE'
                 
                 lines.append(f"   Last Heartbeat: {last_hb} ({hb_age:.0f}s ago) {status}")
-            except:
+            except Exception:
                 lines.append(f"   Last Heartbeat: {last_hb}")
         else:
             lines.append("   Last Heartbeat: None")
@@ -597,23 +592,7 @@ class Formatter:
     @staticmethod
     def _format_worker_logs_only(info: WorkerInfo) -> str:
         """Format only worker logs timeline."""
-        lines = []
-        
-        lines.append(f"📜 Event Timeline for Worker: {info.worker_id}")
-        lines.append("=" * 80)
-        
-        if not info.logs:
-            lines.append("No logs found")
-            return "\n".join(lines)
-        
-        for log in info.logs:
-            timestamp = log['timestamp'][11:19] if len(log['timestamp']) >= 19 else log['timestamp']
-            level = log['log_level']
-            message = log['message']
-            
-            lines.append(f"[{timestamp}] [{level:8}] {message}")
-        
-        return "\n".join(lines)
+        return Formatter._format_logs_timeline("Worker", info.worker_id, info.logs)
     
     # ==================== TASKS SUMMARY FORMATTING ====================
     
@@ -718,7 +697,7 @@ class Formatter:
                             status_symbol = '❌'
                         
                         hb_str = f"{hb_age:.0f}s ago"
-                    except:
+                    except Exception:
                         status_symbol = '❓'
                         hb_str = last_hb[:19]
                 else:

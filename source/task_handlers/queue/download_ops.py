@@ -1,0 +1,142 @@
+"""
+Model-switching and task-conversion logic extracted from HeadlessTaskQueue.
+
+Every public function in this module takes the ``HeadlessTaskQueue`` instance
+(aliased *queue*) as its first argument so that it can access ``queue.logger``,
+``queue.orchestrator``, ``queue.current_model``, etc.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Any, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from headless_model_management import HeadlessTaskQueue, GenerationTask
+
+from source.core.log import is_debug_enabled
+
+
+# ---------------------------------------------------------------------------
+# Model switching
+# ---------------------------------------------------------------------------
+
+def switch_model_impl(queue: "HeadlessTaskQueue", model_key: str, worker_name: str) -> bool:
+    """
+    Ensure the correct model is loaded using wgp.py's model management.
+
+    This leverages the orchestrator's model loading while tracking
+    the change in our queue system. The orchestrator checks WGP's ground truth
+    (wgp.transformer_type) to determine if a switch is actually needed.
+
+    Returns:
+        bool: True if a model switch actually occurred, False if already loaded
+    """
+    # Ensure orchestrator is initialized before switching models
+    queue._ensure_orchestrator()
+
+    queue.logger.debug(f"{worker_name} ensuring model {model_key} is loaded (current: {queue.current_model})")
+    switch_start = time.time()
+
+    try:
+        # Use orchestrator's model loading - it checks WGP's ground truth
+        # and returns whether a switch actually occurred
+        switched = queue.orchestrator.load_model(model_key)
+
+        if switched:
+            # Only do switch-specific actions if a switch actually occurred
+            queue.logger.info(f"{worker_name} switched model: {queue.current_model} → {model_key}")
+
+            queue.stats["model_switches"] += 1
+            switch_time = time.time() - switch_start
+            queue.logger.info(f"Model switch completed in {switch_time:.1f}s")
+
+        # Always sync our tracking with orchestrator's state
+        queue.current_model = model_key
+        return switched
+
+    except (RuntimeError, ValueError, OSError) as e:
+        queue.logger.error(f"Model switch failed: {e}")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Task conversion
+# ---------------------------------------------------------------------------
+
+def convert_to_wgp_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask") -> Dict[str, Any]:
+    """
+    Convert task to WGP parameters using typed TaskConfig.
+
+    This:
+    1. Parses all params into TaskConfig at the boundary
+    2. Handles LoRA downloads via LoRAConfig
+    3. Converts to WGP format only at the end
+    """
+    from source.core.params import TaskConfig
+
+    # Parse into typed config
+    config = TaskConfig.from_db_task(
+        task.parameters,
+        task_id=task.id,
+        task_type=task.parameters.get('_source_task_type', ''),
+        model=task.model,
+        debug_mode=is_debug_enabled()
+    )
+
+    # Add prompt and model
+    config.generation.prompt = task.prompt
+    config.model = task.model
+
+    # Log the parsed config
+    if is_debug_enabled():
+        config.log_summary(queue.logger.info)
+
+    # Handle LoRA downloads if any are pending
+    if config.lora.has_pending_downloads():
+        queue.logger.info(f"[LORA_PROCESS] Task {task.id}: {len(config.lora.get_pending_downloads())} LoRAs need downloading")
+
+        # Ensure we're in Wan2GP directory for LoRA operations
+        _saved_cwd = os.getcwd()
+        if _saved_cwd != queue.wan_dir:
+            os.chdir(queue.wan_dir)
+
+        try:
+            from source.models.lora.lora_utils import _download_lora_from_url
+
+            for url, mult in list(config.lora.get_pending_downloads().items()):
+                try:
+                    local_path = _download_lora_from_url(url, task.id, model_type=task.model)
+                    if local_path:
+                        config.lora.mark_downloaded(url, local_path)
+                        queue.logger.info(f"[LORA_DOWNLOAD] Task {task.id}: Downloaded {os.path.basename(local_path)}")
+                    else:
+                        queue.logger.warning(f"[LORA_DOWNLOAD] Task {task.id}: Failed to download {url}")
+                except (OSError, ValueError, RuntimeError) as e:
+                    queue.logger.warning(f"[LORA_DOWNLOAD] Task {task.id}: Error downloading {url}: {e}")
+        finally:
+            if _saved_cwd != queue.wan_dir:
+                os.chdir(_saved_cwd)
+
+    # Validate before conversion
+    errors = config.validate()
+    if errors:
+        queue.logger.warning(f"[TASK_CONFIG] Task {task.id}: Validation warnings: {errors}")
+
+    # Convert to WGP format (single conversion point)
+    wgp_params = config.to_wgp_format()
+
+    # Ensure prompt and model are set
+    wgp_params["prompt"] = task.prompt
+    wgp_params["model"] = task.model
+
+    # Filter out infrastructure params
+    for param in ["supabase_url", "supabase_anon_key", "supabase_access_token"]:
+        wgp_params.pop(param, None)
+
+    if is_debug_enabled():
+        queue.logger.info(f"[TASK_CONVERSION] Task {task.id}: Converted with {len(wgp_params)} params")
+        queue.logger.debug(f"[TASK_CONVERSION] Task {task.id}: LoRAs: {wgp_params.get('activated_loras', [])}")
+
+    return wgp_params

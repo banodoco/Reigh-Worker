@@ -106,3 +106,6 @@ htmlcov/
 node_modules/
 *.webm
 Wan2GP_original
+
+# Supabase edge functions (managed separately)
+supabase/
