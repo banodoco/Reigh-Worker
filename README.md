@@ -66,7 +66,7 @@ python -m debug task <task_id>          # Investigate a task
 python -m debug tasks --status Failed   # List recent failures
 ```
 
-## Test Results
+## Tests
 
 ```
 tests/test_ltx2_pose_smoke.py       8 passed           Pose extraction + control signal wiring
@@ -76,6 +76,20 @@ tests/test_ic_lora_gpu.py           1 passed, 1 skip   IC-LoRA pose workflow (GP
 tests/test_ic_lora_gpu.py           1 passed, 1 skip   IC-LoRA union control (GPU)
 ─────────────────────────────────────────────────────
 Total                              69 passed, 2 skipped
+```
+
+### Running Tests
+
+```bash
+# Headless tests (no GPU required, runs in seconds)
+python -m pytest tests/test_ltx2_pose_smoke.py tests/test_ltx2_headless.py tests/test_task_conversion_headless.py -v
+
+# GPU tests (requires GPU + model weights + test media)
+# Prerequisites: place vid1.mp4 and img1.png in Wan2GP/ directory
+python -m pytest tests/test_ic_lora_gpu.py -v -s
+
+# All tests at once
+python -m pytest tests/test_ltx2_pose_smoke.py tests/test_ltx2_headless.py tests/test_task_conversion_headless.py tests/test_ic_lora_gpu.py -v -s
 ```
 
 ## Code Health
