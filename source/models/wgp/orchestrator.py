@@ -77,10 +77,8 @@ from source.core.log import is_debug_enabled
 def _set_wgp_output_paths(wgp_module, output_dir: str) -> None:
     """Set output paths on WGP module-level state and server_config dict.
 
-    Must be called both BEFORE and AFTER apply_changes() because
-    apply_changes() resets certain internal state. The WGP vendored
-    code reads these paths at initialization AND at generation time,
-    so both calls are required to ensure correct output locations.
+    Must be called after initializing WGP defaults. The WGP vendored
+    code reads these paths at initialization AND at generation time.
     """
     if not hasattr(wgp_module, 'server_config'):
         wgp_module.server_config = {}
@@ -235,7 +233,7 @@ class WanOrchestrator:
                 sys.argv = ["headless_wgp.py"]
                 from wgp import (
                     generate_video, get_base_model_type, get_model_family,
-                    test_vace_module, apply_changes
+                    test_vace_module, get_default_settings, set_model_settings
                 )
 
                 # Verify directory didn't change during wgp import
@@ -246,7 +244,8 @@ class WanOrchestrator:
                 self._get_base_model_type = get_base_model_type
                 self._get_model_family = get_model_family
                 self._test_vace_module = test_vace_module
-                self._apply_changes = apply_changes
+                self._get_default_settings = get_default_settings
+                self._set_model_settings = set_model_settings
 
                 # Apply WGP monkeypatches for headless operation (Qwen support, LoRA fixes, etc.)
                 import wgp as wgp
@@ -272,7 +271,7 @@ class WanOrchestrator:
                     if not hasattr(wgp, attr):
                         setattr(wgp, attr, default)
 
-                # Set output paths on WGP (first call — before apply_changes)
+                # Set output paths on WGP (initial call before defaults init)
                 _set_wgp_output_paths(wgp, absolute_outputs_path)
                 model_logger.info(f"[OUTPUT_DIR] Set output paths to {absolute_outputs_path}")
 
@@ -340,38 +339,25 @@ class WanOrchestrator:
                 default_model_type = "t2v"
             self.state["model_type"] = default_model_type
 
-            # Upstream apply_changes signature accepts a single save_path_choice
-            outputs_dir = "outputs/"
+            # Initialize model defaults using upstream get_default_settings + set_model_settings
             try:
-                orchestrator_logger.debug("Calling wgp.apply_changes() to initialize defaults...")
-                self._apply_changes(
-                    self.state,
-                    transformer_types_choices=["t2v"],
-                    transformer_dtype_policy_choice="auto",
-                    text_encoder_quantization_choice="bf16",
-                    VAE_precision_choice="fp32",
-                    mixed_precision_choice=0,
-                    save_path_choice=outputs_dir,
-                    image_save_path_choice=outputs_dir,
-                    attention_choice="auto",
-                    compile_choice="",
-                    profile_choice=1,  # Profile 1 for 24GB+ VRAM (4090/3090)
-                    vae_config_choice="default",
-                    metadata_choice="none",
-                    quantization_choice="int8",
-                    preload_model_policy_choice=[]
-                )
-                orchestrator_logger.debug("wgp.apply_changes() completed successfully")
+                orchestrator_logger.debug("Initializing WGP defaults via get_default_settings/set_model_settings...")
+                defaults = self._get_default_settings(default_model_type)
+                self._set_model_settings(self.state, default_model_type, defaults)
+                orchestrator_logger.debug("WGP defaults initialized successfully")
             except (RuntimeError, ValueError, TypeError, KeyError) as e:
-                orchestrator_logger.error(f"FATAL: wgp.apply_changes() failed: {e}\n{traceback.format_exc()}")
-                raise RuntimeError(f"Failed to apply WGP defaults during orchestrator init: {e}") from e
+                orchestrator_logger.error(f"FATAL: WGP default settings init failed: {e}\n{traceback.format_exc()}")
+                raise RuntimeError(f"Failed to initialize WGP defaults during orchestrator init: {e}") from e
 
-            # Verify directory after apply_changes (it may have done file operations)
-            _verify_wgp_directory(orchestrator_logger, "after apply_changes()")
+            _verify_wgp_directory(orchestrator_logger, "after initializing defaults")
 
-            # Set output paths again (second call — after apply_changes)
-            _set_wgp_output_paths(wgp, absolute_outputs_path)
-            orchestrator_logger.info(f"[OUTPUT_DIR] Re-applied output paths after apply_changes(): {absolute_outputs_path}")
+            # Set output paths in both server_config dict and module-level vars
+            orchestrator_logger.info(f"[OUTPUT_DIR] Applying output directory configuration...")
+            wgp.server_config['save_path'] = absolute_outputs_path
+            wgp.server_config['image_save_path'] = absolute_outputs_path
+            wgp.save_path = absolute_outputs_path
+            wgp.image_save_path = absolute_outputs_path
+            orchestrator_logger.info(f"[OUTPUT_DIR] Final: dict={{save_path={wgp.server_config['save_path']}, image_save_path={wgp.server_config['image_save_path']}}}, module={{save_path={wgp.save_path}, image_save_path={wgp.image_save_path}}}")
 
         else:
             # Provide stubbed helpers for smoke mode
@@ -631,11 +617,13 @@ class WanOrchestrator:
         if is_vace:
             if not video_prompt_type:
                 video_prompt_type = "VP"
-            if control_net_weight is None:
-                control_net_weight = 1.0
-            if control_net_weight2 is None:
-                control_net_weight2 = 1.0
             generation_logger.debug(f"VACE parameters - guide: {video_guide}, type: {video_prompt_type}, weights: {control_net_weight}/{control_net_weight2}")
+
+        # Default control_net weights for any model (VACE, LTX-2, etc.)
+        if control_net_weight is None:
+            control_net_weight = 1.0
+        if control_net_weight2 is None:
+            control_net_weight2 = 1.0
 
         # Resolve media paths before validation
         video_guide = self._resolve_media_path(video_guide)

@@ -167,6 +167,20 @@ def build_passthrough_params(
         'hires_config': resolved_params.get('hires_config', None),
         'system_prompt': resolved_params.get('system_prompt', ''),
 
+        # v10.x parameters
+        'alt_prompt': resolved_params.get('alt_prompt', ''),
+        'duration_seconds': resolved_params.get('duration_seconds', 0),
+        'pause_seconds': resolved_params.get('pause_seconds', 0),
+        'audio_scale': resolved_params.get('audio_scale', 1.0),
+        'input_video_strength': resolved_params.get('input_video_strength', 1.0),
+        'override_attention': resolved_params.get('override_attention', ''),
+        'custom_settings': resolved_params.get('custom_settings', {}),
+        'top_k': resolved_params.get('top_k', 0),
+        'self_refiner_setting': resolved_params.get('self_refiner_setting', 0),
+        'self_refiner_plan': resolved_params.get('self_refiner_plan', ''),
+        'self_refiner_f_uncertainty': resolved_params.get('self_refiner_f_uncertainty', 0.0),
+        'self_refiner_certain_percentage': resolved_params.get('self_refiner_certain_percentage', 0.0),
+
         # Mode and filename
         'mode': 'generate',
         'model_filename': '',
@@ -348,6 +362,20 @@ def build_normal_params(
         'prompt_enhancer': 0,
         'min_frames_if_references': 9,
         'override_profile': override_profile_value,
+
+        # v10.x parameters
+        'alt_prompt': resolved_params.get("alt_prompt", ""),
+        'duration_seconds': resolved_params.get("duration_seconds", 0),
+        'pause_seconds': resolved_params.get("pause_seconds", 0),
+        'audio_scale': resolved_params.get("audio_scale", 1.0),
+        'input_video_strength': resolved_params.get("input_video_strength", 1.0),
+        'override_attention': resolved_params.get("override_attention", ""),
+        'custom_settings': resolved_params.get("custom_settings", {}),
+        'top_k': resolved_params.get("top_k", 0),
+        'self_refiner_setting': resolved_params.get("self_refiner_setting", 0),
+        'self_refiner_plan': resolved_params.get("self_refiner_plan", ""),
+        'self_refiner_f_uncertainty': resolved_params.get("self_refiner_f_uncertainty", 0.0),
+        'self_refiner_certain_percentage': resolved_params.get("self_refiner_certain_percentage", 0.0),
 
         # Mode and filename
         'mode': "generate",

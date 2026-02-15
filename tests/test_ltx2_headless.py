@@ -288,16 +288,18 @@ class TestLTX2ParameterWiring:
 
     def test_new_params_present_in_headless_wgp(self):
         """All new parameters should appear as keys in the wgp_params dict
-        within headless_wgp.py (both passthrough and normal modes)."""
+        within the WGP params builder (wgp_params.py) or orchestrator.py."""
         import re
 
+        # Check both orchestrator.py and the extracted wgp_params.py module
         src = (PROJECT_ROOT / "source" / "models" / "wgp" / "orchestrator.py").read_text()
+        src += (PROJECT_ROOT / "source" / "models" / "wgp" / "generators" / "wgp_params.py").read_text()
         # Find all string-keyed dict entries in wgp_params
         found_keys = set(re.findall(r"'([a-zA-Z_]\w*)'\s*:", src))
 
         for p in self.NEW_PARAMS:
             assert p in found_keys, (
-                f"'{p}' not found as a key in orchestrator.py"
+                f"'{p}' not found as a key in orchestrator.py or wgp_params.py"
             )
 
 
