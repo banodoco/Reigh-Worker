@@ -634,12 +634,29 @@ class LTX2:
         loras = []
         video_prompt_type = video_prompt_type or ""
         preload_urls = get_model_recursive_prop(model_type, "preload_URLs")
-        for letter, signature in map.items():
-            if letter in video_prompt_type:
-                for file_name in preload_urls:
-                    if signature in file_name:
-                        loras.append(fl.locate_file(os.path.basename(file_name)))
-                        break
+
+        # Which control types are requested?
+        requested_controls = [letter for letter in map if letter in video_prompt_type]
+
+        # Check if union control LoRA is available
+        union_lora = None
+        for file_name in preload_urls:
+            if "union-control" in file_name or "union_control" in file_name:
+                union_lora = fl.locate_file(os.path.basename(file_name))
+                break
+
+        # Multiple control types + union available → use single union LoRA
+        if len(requested_controls) > 1 and union_lora is not None:
+            loras.append(union_lora)
+        else:
+            # Existing logic: separate LoRAs per control type
+            for letter, signature in map.items():
+                if letter in video_prompt_type:
+                    for file_name in preload_urls:
+                        if signature in file_name and "union" not in file_name:
+                            loras.append(fl.locate_file(os.path.basename(file_name)))
+                            break
+
         loras_mult = [1.0] * len(loras)
         return loras, loras_mult
 

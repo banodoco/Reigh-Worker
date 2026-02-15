@@ -63,6 +63,22 @@ def start_image():
     return path
 
 
+@pytest.fixture()
+def pose_control_video():
+    """vid1.mp4 control video for pose IC LoRA workflow."""
+    path = str(TESTS_DIR / "vid1.mp4")
+    assert os.path.isfile(path), f"Pose control video missing: {path}"
+    return path
+
+
+@pytest.fixture()
+def pose_start_image():
+    """img1.png start image for pose IC LoRA workflow."""
+    path = str(TESTS_DIR / "img1.png")
+    assert os.path.isfile(path), f"Pose start image missing: {path}"
+    return path
+
+
 def _make_orchestrator(wan_root: str, output_dir: Path):
     """Real GPU orchestrator — NO smoke mode."""
     os.environ.pop("HEADLESS_WAN2GP_SMOKE", None)
@@ -169,6 +185,68 @@ class TestICLoraGPU:
         size = os.path.getsize(result)
         assert size > 1000, f"Output too small ({size} bytes), likely not a real video"
         print(f"[GPU] Canny IC LoRA output: {result} ({size / 1024:.1f} KB)")
+
+    def test_ic_lora_pose_workflow_params(
+        self, _chdir_to_wan2gp, output_dir, pose_control_video, pose_start_image
+    ):
+        """Pose IC LoRA with workflow-matched parameters (distilled mode)."""
+        orch = _make_orchestrator(_chdir_to_wan2gp, output_dir)
+
+        print("\n[GPU] Loading LTX-2 19B model...")
+        switched = orch.load_model("ltx2_19B")
+        assert switched is True
+        print("[GPU] Model loaded.")
+
+        print(f"[GPU] IC LoRA pose (workflow params) with: vid1.mp4")
+        result = orch.generate(
+            prompt="a young woman dancing in her room",
+            resolution="768x512",
+            video_length=97,
+            num_inference_steps=8,
+            guidance_scale=1.0,
+            seed=42,
+            start_image=pose_start_image,
+            video_guide=pose_control_video,
+            video_prompt_type="PVG",
+            control_net_weight=0.95,
+        )
+
+        assert result is not None, "generate() returned None"
+        assert os.path.isfile(result), f"Output not found: {result}"
+        size = os.path.getsize(result)
+        assert size > 1000, f"Output too small ({size} bytes), likely not a real video"
+        print(f"[GPU] Pose workflow IC LoRA output: {result} ({size / 1024:.1f} KB)")
+
+    def test_ic_lora_union_control(
+        self, _chdir_to_wan2gp, output_dir, pose_control_video, pose_start_image
+    ):
+        """Union control LoRA with PD (pose+depth) combined test."""
+        orch = _make_orchestrator(_chdir_to_wan2gp, output_dir)
+
+        print("\n[GPU] Loading LTX-2 19B model...")
+        switched = orch.load_model("ltx2_19B")
+        assert switched is True
+        print("[GPU] Model loaded.")
+
+        print(f"[GPU] IC LoRA union control (PD) with: vid1.mp4")
+        result = orch.generate(
+            prompt="a young woman dancing in her room, detailed depth and pose",
+            resolution="768x512",
+            video_length=97,
+            num_inference_steps=8,
+            guidance_scale=1.0,
+            seed=42,
+            start_image=pose_start_image,
+            video_guide=pose_control_video,
+            video_prompt_type="PDVG",
+            control_net_weight=0.95,
+        )
+
+        assert result is not None, "generate() returned None"
+        assert os.path.isfile(result), f"Output not found: {result}"
+        size = os.path.getsize(result)
+        assert size > 1000, f"Output too small ({size} bytes), likely not a real video"
+        print(f"[GPU] Union control IC LoRA output: {result} ({size / 1024:.1f} KB)")
 
 
 # ---------------------------------------------------------------------------
