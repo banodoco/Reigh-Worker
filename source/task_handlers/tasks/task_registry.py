@@ -27,7 +27,6 @@ from source.task_handlers.tasks.travel_segment_types import IndividualSegmentPar
 from source.task_handlers.extract_frame import handle_extract_frame_task
 from source.task_handlers.rife_interpolate import handle_rife_interpolate_task
 from source.models.comfy.comfy_handler import handle_comfy_task
-from source.models.comfy.ltx2_multiframe_handler import handle_ltx2_multiframe_task
 from source.task_handlers.travel import orchestrator as travel_orchestrator
 from source.task_handlers.travel.stitch import _handle_travel_stitch_task
 from source.task_handlers import magic_edit as me
@@ -1182,10 +1181,6 @@ class TaskRegistry:
                 params, context["main_output_dir_base"], task_id, task_queue=context["task_queue"]
             ),
             "comfy": lambda: handle_comfy_task(
-                task_params_from_db=params,
-                main_output_dir_base=context["main_output_dir_base"],
-                task_id=task_id),
-            "ltx2_multiframe": lambda: handle_ltx2_multiframe_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 task_id=task_id)

@@ -115,33 +115,6 @@ class ComfyUIClient:
         result = response.json()
         return result.get('name', filename)
 
-    async def upload_image(
-        self,
-        client: httpx.AsyncClient,
-        image_bytes: bytes,
-        filename: str
-    ) -> str:
-        """Upload image to ComfyUI."""
-        # Determine MIME type from extension
-        ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'png'
-        mime_types = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-                      'webp': 'image/webp', 'bmp': 'image/bmp'}
-        mime = mime_types.get(ext, 'image/png')
-
-        files = {'image': (filename, image_bytes, mime)}
-        data = {'overwrite': 'true'}
-
-        response = await client.post(
-            f"{self.base_url}/upload/image",
-            files=files,
-            data=data,
-            timeout=120.0
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        return result.get('name', filename)
-
     async def queue_workflow(
         self,
         client: httpx.AsyncClient,
