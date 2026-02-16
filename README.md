@@ -1,6 +1,6 @@
 # Reigh-Worker
 
-GPU worker for [Reigh](https://github.com/banodoco/Reigh) — processes video generation tasks using [Wan2GP](https://github.com/deepbeepmeep/Wan2GP).
+GPU worker for [Reigh](https://github.com/banodoco/Reigh), for running locally or in the cloud via [Reigh Worker Orchestrator](https://github.com/banodoco/Reigh-Worker-Orchestrator/) — processes video generation tasks using [Wan2GP](https://github.com/deepbeepmeep/Wan2GP).
 
 ## Quick Start
 
