@@ -103,6 +103,8 @@ TASK_TYPE_TO_MODEL: Dict[str, str] = {
     "z_image_turbo": "z_image",
     # Image-to-image tasks
     "z_image_turbo_i2i": "z_image_img2img",
+    # LTX-2 multiframe (ComfyUI-based, not WGP queue)
+    "ltx2_multiframe": "ltx2_19B",
 }
 
 
