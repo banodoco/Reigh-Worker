@@ -860,6 +860,18 @@ class LTX2:
             if image_end is not None:
                 images.append((image_end, _to_latent_index(frame_num - 1, latent_stride), 1.0))
 
+        # Multi-frame guide images: inject additional images at arbitrary frame positions
+        guide_images = kwargs.get("guide_images")
+        if guide_images:
+            for guide_img, frame_idx, strength in guide_images:
+                if frame_idx == -1:
+                    frame_idx = frame_num - 1
+                latent_idx = _to_latent_index(frame_idx, latent_stride)
+                entry = (guide_img, latent_idx, strength)
+                images.append(entry)
+                if isinstance(self.pipeline, TI2VidTwoStagesPipeline):
+                    images_stage2.append(entry)
+
         tiling_config = _build_tiling_config(VAE_tile_size, fps)
         interrupt_check = lambda: self._interrupt
         loras_slists = kwargs.get("loras_slists")

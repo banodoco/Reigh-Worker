@@ -554,20 +554,38 @@ class WanOrchestrator:
                 kwargs["audio_guide"] = _ai
                 generation_logger.info(f"[LTX2_BRIDGE] Mapped audio_input → audio_guide: {_ai}")
 
+            # guide_images bridging: convert paths to PIL images
+            _gi = kwargs.get("guide_images")
+            if _gi and isinstance(_gi, list):
+                bridged = []
+                for entry in _gi:
+                    img_path, frame_idx, strength = entry["image"], entry["frame_idx"], entry.get("strength", 1.0)
+                    if isinstance(img_path, str):
+                        _img = _PILImage.open(img_path).convert("RGB")
+                        _img = _ImageOps.exif_transpose(_img)
+                        bridged.append((_img, frame_idx, strength))
+                    else:
+                        bridged.append((img_path, frame_idx, strength))
+                kwargs["guide_images"] = bridged
+                generation_logger.info(f"[LTX2_BRIDGE] Converted {len(bridged)} guide_images to PIL")
+
             # Auto-detect image_prompt_type for LTX-2 when not explicitly set
             base_type_check = (self._get_base_model_type(self.current_model) or "").lower()
             if base_type_check.startswith("ltx2") and "image_prompt_type" not in kwargs:
                 has_start = kwargs.get("image_start") is not None
                 has_end = kwargs.get("image_end") is not None
+                has_guides = bool(kwargs.get("guide_images"))
                 if has_start and has_end:
                     kwargs["image_prompt_type"] = "TSE"
                 elif has_start:
                     kwargs["image_prompt_type"] = "TS"
                 elif has_end:
                     kwargs["image_prompt_type"] = "TE"
+                elif has_guides:
+                    kwargs["image_prompt_type"] = "T"
                 else:
                     kwargs["image_prompt_type"] = "T"
-                generation_logger.info(f"[LTX2_BRIDGE] Auto-detected image_prompt_type='{kwargs['image_prompt_type']}' (start={has_start}, end={has_end})")
+                generation_logger.info(f"[LTX2_BRIDGE] Auto-detected image_prompt_type='{kwargs['image_prompt_type']}' (start={has_start}, end={has_end}, guides={has_guides})")
         except ImportError:
             pass  # PIL not available yet; images handled downstream
 

@@ -306,6 +306,7 @@ def build_normal_params(
         'image_prompt_type': resolved_params.get("image_prompt_type", "disabled"),
         'image_start': resolved_params.get("image_start"),
         'image_end': resolved_params.get("image_end"),
+        'guide_images': resolved_params.get("guide_images"),
         'image_refs': resolved_params.get("image_refs"),
         'frames_positions': resolved_params.get("frames_positions", ""),
         'image_guide': resolved_params.get("image_guide"),

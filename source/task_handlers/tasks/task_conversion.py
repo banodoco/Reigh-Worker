@@ -74,6 +74,8 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
         "uni3c_zero_empty_frames", "uni3c_blackout_last_frame",
         # Image-to-image parameters
         "denoising_strength",
+        # Multi-frame guide images
+        "guide_images",
     }
     
     for param in param_whitelist:
@@ -244,6 +246,34 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
 
         # Override model to use Z-Image img2img
         model = "z_image_img2img"
+
+    elif task_type == "ltx2_multiframe":
+        # Download guide images from URLs to local paths
+        guide_images_raw = db_task_params.get("guide_images", [])
+        if guide_images_raw:
+            import tempfile
+            import requests
+            resolved_guides = []
+            for i, entry in enumerate(guide_images_raw):
+                img_source = entry.get("image") or entry.get("image_url")
+                if img_source and img_source.startswith(("http://", "https://")):
+                    response = requests.get(img_source, timeout=30)
+                    response.raise_for_status()
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp.write(response.content)
+                        local_path = tmp.name
+                else:
+                    local_path = img_source
+                resolved_guides.append({
+                    "image": local_path,
+                    "frame_idx": entry.get("frame_idx", 0),
+                    "strength": entry.get("strength", 1.0),
+                })
+            generation_params["guide_images"] = resolved_guides
+            headless_logger.info(
+                f"[LTX2_MULTIFRAME] Resolved {len(resolved_guides)} guide images",
+                task_id=task_id
+            )
 
     # Defaults
     essential_defaults = {
