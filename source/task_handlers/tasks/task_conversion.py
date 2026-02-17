@@ -247,7 +247,7 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
         # Override model to use Z-Image img2img
         model = "z_image_img2img"
 
-    elif task_type == "ltx2_multiframe":
+    elif task_type in ("ltx2_multiframe", "ltx2_ic_multiframe"):
         # Download guide images from URLs to local paths
         guide_images_raw = db_task_params.get("guide_images", [])
         if guide_images_raw:
@@ -271,7 +271,7 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
                 })
             generation_params["guide_images"] = resolved_guides
             headless_logger.info(
-                f"[LTX2_MULTIFRAME] Resolved {len(resolved_guides)} guide images",
+                f"[{task_type.upper()}] Resolved {len(resolved_guides)} guide images",
                 task_id=task_id
             )
 
