@@ -1391,7 +1391,7 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                                 prompt_preview = prompt[:60] if prompt else "EMPTY"
                                 travel_logger.debug(f"[EDGE_FUNC_DEBUG]   [{i}] → {img_name} | '{prompt_preview}...'")
                             travel_logger.debug(f"[EDGE_FUNC_DEBUG] WARNING: If images above don't match timeline_frame order in shot_generations, prompts will be misaligned!")
-                            travel_logger.debug(f"[VLM_BATCH] Using auth token: {'SERVICE_KEY' if db_config.SUPABASE_SERVICE_KEY else ('ACCESS_TOKEN' if db_config.SUPABASE_ACCESS_TOKEN else 'None')}")
+                            travel_logger.debug("[VLM_BATCH] Edge function auth configured")
 
                             resp = httpx.post(edge_url, json=payload, headers=headers, timeout=30)
 
@@ -1402,7 +1402,9 @@ def handle_travel_orchestrator_task(task_params_from_db: dict, main_output_dir_b
                             else:
                                 travel_logger.debug(f"[VLM_BATCH] WARNING: Edge function call failed: {resp.status_code} - {resp.text}")
                     else:
-                        travel_logger.debug(f"[VLM_BATCH] Skipping edge function call (has_auth_token={bool(auth_token)}, has_supabase_url={bool(db_config.SUPABASE_URL)}, generated={len(complete_enhanced_prompts)} prompts)")
+                        travel_logger.debug(
+                            f"[VLM_BATCH] Skipping edge function call (generated={len(complete_enhanced_prompts)} prompts)"
+                        )
 
                 except (httpx.HTTPError, OSError, ValueError) as e_edge:
                     travel_logger.debug(f"[VLM_BATCH] WARNING: Failed to call edge function: {e_edge}", exc_info=True)

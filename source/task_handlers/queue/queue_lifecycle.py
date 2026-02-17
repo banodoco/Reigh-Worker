@@ -10,10 +10,7 @@ from __future__ import annotations
 import threading
 import time
 import traceback
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from headless_model_management import HeadlessTaskQueue, GenerationTask
+from typing import Any
 
 from source.task_handlers.queue.task_processor import worker_loop, _monitor_loop
 
@@ -22,7 +19,7 @@ from source.task_handlers.queue.task_processor import worker_loop, _monitor_loop
 # Start
 # ---------------------------------------------------------------------------
 
-def start_queue(queue: "HeadlessTaskQueue", preload_model=None):
+def start_queue(queue: Any, preload_model=None):
     """
     Start the task queue processing service.
 
@@ -91,7 +88,7 @@ def start_queue(queue: "HeadlessTaskQueue", preload_model=None):
 # Stop
 # ---------------------------------------------------------------------------
 
-def stop_queue(queue: "HeadlessTaskQueue", timeout: float = 30.0):
+def stop_queue(queue: Any, timeout: float = 30.0):
     """Stop the task queue processing service."""
     if not queue.running:
         return
@@ -117,7 +114,7 @@ def stop_queue(queue: "HeadlessTaskQueue", timeout: float = 30.0):
 # Submit
 # ---------------------------------------------------------------------------
 
-def submit_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask") -> str:
+def submit_task_impl(queue: Any, task: Any) -> str:
     """
     Submit a new generation task to the queue.
 

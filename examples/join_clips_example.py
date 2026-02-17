@@ -195,7 +195,7 @@ def run_join_clips(
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
-        traceback.print_exc()
+        print(traceback.format_exc())
         return False
 
     finally:

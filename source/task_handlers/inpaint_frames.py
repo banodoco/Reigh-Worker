@@ -292,3 +292,7 @@ def _handle_inpaint_frames_task(
         error_msg = f"Unexpected error in inpaint_frames handler: {e}"
         task_logger.debug(f"[INPAINT_FRAMES_ERROR] Task {task_id}: {error_msg}", exc_info=True)
         return False, error_msg
+
+
+# Public alias for cross-module use.
+handle_inpaint_frames_task = _handle_inpaint_frames_task

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from source.core.params.phase_config_parser import parse_phase_config
 from source.core.params import TaskConfig, LoRAConfig, LoRAStatus
-from source.models.lora.lora_utils import _download_lora_from_url
+from source.models.lora.lora_utils import download_lora_from_url
 
 
 class TestLoRAFlow:
@@ -188,7 +188,7 @@ class TestLoRAFlow:
         assert len(pending) == 2
         
         # 5. Mock the download step
-        with patch('source.models.lora.lora_utils._download_lora_from_url') as mock_download:
+        with patch('source.models.lora.lora_utils.download_lora_from_url') as mock_download:
             # Mock returns the filename
             mock_download.side_effect = lambda url, task_id: os.path.basename(url)
             
@@ -561,7 +561,7 @@ class TestDownloaderUtils:
             out.write_bytes(b"stub")
             return str(out)
 
-        # Patch the import used inside _download_lora_from_url
+        # Patch the import used inside download_lora_from_url
         import huggingface_hub
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_hf_hub_download)
 
@@ -570,7 +570,7 @@ class TestDownloaderUtils:
         monkeypatch.setattr(lora_paths, "get_lora_dir_for_model", lambda model_type, wan_dir: loras_dir)
 
         url = "https://huggingface.co/org/repo/blob/main/loras/my_lora.safetensors"
-        out = _download_lora_from_url(url, task_id="test")
+        out = download_lora_from_url(url, task_id="test")
 
         assert out == "my_lora.safetensors"
         assert called["repo_id"] == "org/repo"
@@ -605,7 +605,7 @@ class TestDownloaderUtils:
         monkeypatch.setattr(lora_paths, "get_lora_search_dirs", lambda wan_dir, repo_root=None: [loras_dir])
 
         url = "https://example.com/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors"
-        out = _download_lora_from_url(url, task_id="test")
+        out = download_lora_from_url(url, task_id="test")
 
         # Legacy generic file removed
         assert not legacy.exists()
@@ -618,4 +618,3 @@ class TestDownloaderUtils:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

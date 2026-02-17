@@ -19,7 +19,7 @@ def run(client: DebugClient, task_id: str, options: dict):
         print(f"❌ Error investigating task: {e}")
         import traceback
         if options.get('debug'):
-            traceback.print_exc()
+            print(traceback.format_exc())
 
 
 

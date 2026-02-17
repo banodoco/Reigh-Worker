@@ -20,10 +20,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from headless_model_management import HeadlessTaskQueue, GenerationTask
+from typing import Any
 
 # Re-export so callers that previously reached cleanup_memory_after_task
 # via worker_thread (and now via task_processor) continue to work.
@@ -42,7 +39,7 @@ _wgp_patch_lock = threading.Lock()
 # Task processing
 # ---------------------------------------------------------------------------
 
-def process_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker_name: str):
+def process_task_impl(queue: Any, task: Any, worker_name: str):
     """
     Process a single generation task.
 
@@ -220,7 +217,7 @@ def process_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker
 # Generation execution
 # ---------------------------------------------------------------------------
 
-def execute_generation_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker_name: str) -> str:
+def execute_generation_impl(queue: Any, task: Any, worker_name: str) -> str:
     """
     Execute the actual generation using headless_wgp.py.
 
@@ -249,8 +246,8 @@ def execute_generation_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", 
 
 
 def _execute_generation_with_patches(
-    queue: "HeadlessTaskQueue",
-    task: "GenerationTask",
+    queue: Any,
+    task: Any,
     worker_name: str,
     generation_params: dict,
 ):
@@ -463,7 +460,7 @@ def _execute_generation_with_patches(
 # Worker loop
 # ---------------------------------------------------------------------------
 
-def worker_loop(queue: "HeadlessTaskQueue"):
+def worker_loop(queue: Any):
     """Main worker loop for processing tasks."""
     import threading
     worker_name = threading.current_thread().name
@@ -491,7 +488,7 @@ def worker_loop(queue: "HeadlessTaskQueue"):
 # Monitor loop
 # ---------------------------------------------------------------------------
 
-def _monitor_loop(queue: "HeadlessTaskQueue"):
+def _monitor_loop(queue: Any):
     """Background monitoring and maintenance loop."""
     queue.logger.info("Queue monitor started")
 

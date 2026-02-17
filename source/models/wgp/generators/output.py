@@ -7,7 +7,7 @@ stdout/stderr/Python logs on failure, and reporting memory usage.
 from typing import Any, Deque, Dict, Optional
 
 from source.core.log import generation_logger
-from source.models.wgp.error_extraction import _extract_wgp_error, LOG_TAIL_MAX_CHARS
+from source.models.wgp.error_extraction import extract_wgp_error, LOG_TAIL_MAX_CHARS
 
 
 def extract_output_path(
@@ -42,7 +42,7 @@ def extract_output_path(
         # system can properly classify errors like OOM.
         stdout_content = captured_stdout.getvalue() if captured_stdout is not None else ""
         stderr_content = captured_stderr.getvalue() if captured_stderr is not None else ""
-        actual_error = _extract_wgp_error(stdout_content, stderr_content)
+        actual_error = extract_wgp_error(stdout_content, stderr_content)
         if actual_error:
             generation_logger.error(f"[WGP_ERROR] Extracted error from WGP output: {actual_error}")
             raise RuntimeError(f"WGP generation failed: {actual_error}")

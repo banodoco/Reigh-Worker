@@ -153,7 +153,7 @@ def run(client: DebugClient, options: dict):
         print(f"❌ Error checking storage: {e}")
         import traceback
         if options.get('debug'):
-            traceback.print_exc()
+            print(traceback.format_exc())
 
     print()
     print("=" * 80)
