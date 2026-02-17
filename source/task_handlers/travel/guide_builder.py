@@ -11,7 +11,7 @@ Handles guide video creation for VACE models, including:
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, List, Any
 
 from source.core.log import travel_logger
 from source.utils import prepare_output_path
@@ -19,10 +19,7 @@ from source.media.video import create_guide_video_for_travel_segment
 from source.core.params.structure_guidance import StructureGuidanceConfig
 from source import db_operations as db_ops
 
-if TYPE_CHECKING:
-    from source.task_handlers.travel.segment_processor import TravelSegmentProcessor
-
-def get_previous_segment_video(proc: "TravelSegmentProcessor") -> Optional[str]:
+def get_previous_segment_video(proc: Any) -> Optional[str]:
     """Get previous segment video output for guide creation."""
     ctx = proc.ctx
 
@@ -118,7 +115,7 @@ def prepare_input_images_for_guide(proc: "TravelSegmentProcessor") -> List[str]:
 
     return input_images_resolved_for_guide
 
-def create_guide_video(proc: "TravelSegmentProcessor") -> Optional[Path]:
+def create_guide_video(proc: Any) -> Optional[Path]:
     """
     Create guide video for VACE models or debug mode.
 

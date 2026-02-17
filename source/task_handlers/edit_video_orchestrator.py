@@ -33,12 +33,12 @@ from ..media.video import extract_frame_range_to_video, ensure_video_fps, get_vi
 
 # Import shared functions from join subpackage
 from source.task_handlers.join.shared import (
-    _extract_join_settings_from_payload,
-    _check_existing_join_tasks)
-from source.task_handlers.join.task_builder import _create_join_chain_tasks
+    extract_join_settings_from_payload,
+    check_existing_join_tasks)
+from source.task_handlers.join.task_builder import create_join_chain_tasks
 from source.task_handlers.join.vlm_enhancement import (
-    _extract_boundary_frames_for_vlm,
-    _generate_vlm_prompts_for_joins)
+    extract_boundary_frames_for_vlm,
+    generate_vlm_prompts_for_joins)
 from source.core.log import task_logger
 
 def _calculate_keeper_segments(
@@ -481,12 +481,12 @@ def _handle_edit_video_orchestrator_task(
         # === EARLY IDEMPOTENCY CHECK (before expensive preprocessing/VLM work) ===
         # Each portion to regenerate = one join task
         num_joins_expected = len(portions_to_regenerate)
-        idempotency_check = _check_existing_join_tasks(orchestrator_task_id_str, num_joins_expected)
+        idempotency_check = check_existing_join_tasks(orchestrator_task_id_str, num_joins_expected)
         if idempotency_check is not None:
             return idempotency_check
         
         # Extract join settings (same as join_clips_orchestrator)
-        join_settings = _extract_join_settings_from_payload(orchestrator_payload)
+        join_settings = extract_join_settings_from_payload(orchestrator_payload)
         per_join_settings = orchestrator_payload.get("per_join_settings", [])
         
         # IMPORTANT: Override replace_mode to False for join tasks.
@@ -550,14 +550,14 @@ def _handle_edit_video_orchestrator_task(
                 # Use replace_mode=False for VLM frame extraction because keeper clips are
                 # already clean - anchors are at the boundaries (last/first frames), not
                 # hidden behind gap frames that need to be skipped.
-                image_pairs = _extract_boundary_frames_for_vlm(
+                image_pairs = extract_boundary_frames_for_vlm(
                     clip_list=clip_list,
                     temp_dir=vlm_temp_dir,
                     orchestrator_task_id=orchestrator_task_id_str,
                     replace_mode=False,  # Keepers have anchors at boundaries
                     gap_frame_count=gap_frame_count)
                 
-                vlm_enhanced_prompts = _generate_vlm_prompts_for_joins(
+                vlm_enhanced_prompts = generate_vlm_prompts_for_joins(
                     image_quads=image_pairs,
                     base_prompt=base_prompt,
                     vlm_device=vlm_device)
@@ -574,7 +574,7 @@ def _handle_edit_video_orchestrator_task(
             task_params_from_db.get("parent_generation_id")
             or orchestrator_payload.get("parent_generation_id")
         )
-        success, message = _create_join_chain_tasks(
+        success, message = create_join_chain_tasks(
             clip_list=clip_list,
             run_id=run_id,
             join_settings=join_settings,
@@ -594,3 +594,6 @@ def _handle_edit_video_orchestrator_task(
         task_logger.debug(f"[EDIT_VIDEO] ERROR: {msg}", exc_info=True)
         return False, msg
 
+
+# Public alias for cross-module use.
+handle_edit_video_orchestrator_task = _handle_edit_video_orchestrator_task

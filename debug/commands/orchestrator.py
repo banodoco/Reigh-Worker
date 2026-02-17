@@ -19,7 +19,7 @@ def run(client: DebugClient, options: dict):
         print(f"❌ Error checking orchestrator status: {e}")
         import traceback
         if options.get('debug'):
-            traceback.print_exc()
+            print(traceback.format_exc())
 
 
 

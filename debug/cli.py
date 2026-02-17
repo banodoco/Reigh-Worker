@@ -180,7 +180,7 @@ def main() -> None:
         if options.get("debug"):
             import traceback
 
-            traceback.print_exc()
+            print(traceback.format_exc())
         sys.exit(1)
 
 

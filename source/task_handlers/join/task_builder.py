@@ -15,6 +15,8 @@ from source.task_handlers.join.shared import _check_orchestrator_cancelled
 __all__ = [
     "_create_join_chain_tasks",
     "_create_parallel_join_tasks",
+    "create_join_chain_tasks",
+    "create_parallel_join_tasks",
 ]
 
 def _create_join_chain_tasks(
@@ -275,3 +277,8 @@ def _create_parallel_join_tasks(
     orchestrator_logger.debug(f"[JOIN_PARALLEL] Complete: {num_joins} transitions + 1 final stitch = {num_joins + 1} total tasks")
 
     return True, f"Successfully enqueued {num_joins} parallel transitions + 1 final stitch for run {run_id}"
+
+
+# Public aliases for cross-module use.
+create_join_chain_tasks = _create_join_chain_tasks
+create_parallel_join_tasks = _create_parallel_join_tasks

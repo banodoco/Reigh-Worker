@@ -10,7 +10,7 @@ Handles mask video creation for frame control, including:
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Any
 
 from source.core.log import travel_logger
 from source.utils import (
@@ -19,10 +19,7 @@ from source.utils import (
     prepare_output_path
 )
 
-if TYPE_CHECKING:
-    from source.task_handlers.travel.segment_processor import TravelSegmentProcessor
-
-def create_mask_video(proc: "TravelSegmentProcessor") -> Optional[Path]:
+def create_mask_video(proc: Any) -> Optional[Path]:
     """
     Create mask video for frame control.
 

@@ -926,3 +926,7 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
 
         log_ram_usage("Stitch end (error)", task_id=stitch_task_id_str)
         return False, f"Stitch task failed: {str(e)[:200]}"
+
+
+# Public alias for cross-module use.
+handle_travel_stitch_task = _handle_travel_stitch_task

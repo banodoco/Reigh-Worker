@@ -116,7 +116,7 @@ def get_task_output_location_from_db(task_id_to_find: str) -> str | None:
         return None
 
     if not _cfg.SUPABASE_ACCESS_TOKEN:
-        headless_logger.error(f"No access token available for get-task-output", task_id=task_id_to_find)
+        headless_logger.error(f"No auth configuration available for get-task-output", task_id=task_id_to_find)
         return None
 
     headers = {
