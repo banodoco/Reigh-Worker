@@ -63,9 +63,10 @@ class TravelSegmentProcessor:
         """Detect if this is a VACE model that requires guide videos."""
         model_name = self.ctx.model_name.lower()
 
-        # Standard VACE model detection logic
-        vace_indicators = ["vace", "controlnet", "cocktail", "lightning"]
-        is_vace = any(indicator in model_name for indicator in vace_indicators)
+        # Only models with "vace" in the name are VACE models.
+        # Other indicators like "lightning", "cocktail" appear in non-VACE models too
+        # (e.g. wan_2_2_i2v_lightning_baseline_2_2_2 is I2V, not VACE).
+        is_vace = "vace" in model_name
 
         travel_logger.debug(f"[VACE_DEBUG] Seg {self.ctx.segment_idx}: Model '{self.ctx.model_name}' -> is_vace_model = {is_vace}", task_id=self.ctx.task_id)
         return is_vace
