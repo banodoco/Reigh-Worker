@@ -32,15 +32,17 @@ class TestTaskTypeIntegrity:
 
     def test_direct_queue_count(self):
         from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
-        assert len(DIRECT_QUEUE_TASK_TYPES) == 22, (
-            f"DIRECT_QUEUE_TASK_TYPES has {len(DIRECT_QUEUE_TASK_TYPES)} entries, expected 22. "
+        # PR #19 adds two direct task types: ltx2_ic_multiframe and z_image_turbo_i2i.
+        assert len(DIRECT_QUEUE_TASK_TYPES) == 24, (
+            f"DIRECT_QUEUE_TASK_TYPES has {len(DIRECT_QUEUE_TASK_TYPES)} entries, expected 24. "
             f"Contents: {sorted(DIRECT_QUEUE_TASK_TYPES)}"
         )
 
     def test_wgp_task_count(self):
         from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
-        assert len(WGP_TASK_TYPES) == 20, (
-            f"WGP_TASK_TYPES has {len(WGP_TASK_TYPES)} entries, expected 20. "
+        # PR #19 adds two WGP task types: ltx2_ic_multiframe and z_image_turbo_i2i.
+        assert len(WGP_TASK_TYPES) == 22, (
+            f"WGP_TASK_TYPES has {len(WGP_TASK_TYPES)} entries, expected 22. "
             f"Contents: {sorted(WGP_TASK_TYPES)}"
         )
 
