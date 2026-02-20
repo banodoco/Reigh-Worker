@@ -122,3 +122,7 @@ def _handle_create_visualization_task(
         error_msg = f"[ERROR Task ID: {viz_task_id_str}] Visualization failed: {e}"
         task_logger.debug(error_msg, exc_info=True)
         return False, error_msg
+
+
+# Public alias for cross-module use.
+handle_create_visualization_task = _handle_create_visualization_task

@@ -5,6 +5,8 @@ This module defines the TaskRegistry class and the TASK_HANDLERS dictionary.
 It allows for a cleaner way to route tasks to their appropriate handlers
 instead of using a massive if/elif block.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
@@ -14,6 +16,7 @@ import uuid
 
 if TYPE_CHECKING:
     from source.core.params.contracts import TaskDispatchContext
+    from headless_model_management import HeadlessTaskQueue
 
 from source.core.log import headless_logger, task_logger
 from source.task_handlers.worker.worker_utils import log_ram_usage
@@ -28,14 +31,14 @@ from source.task_handlers.extract_frame import handle_extract_frame_task
 from source.task_handlers.rife_interpolate import handle_rife_interpolate_task
 from source.models.comfy.comfy_handler import handle_comfy_task
 from source.task_handlers.travel import orchestrator as travel_orchestrator
-from source.task_handlers.travel.stitch import _handle_travel_stitch_task
+from source.task_handlers.travel.stitch import handle_travel_stitch_task
 from source.task_handlers import magic_edit as me
 from source.task_handlers.join.generation import handle_join_clips_task
 from source.task_handlers.join.final_stitch import handle_join_final_stitch
-from source.task_handlers.join.orchestrator import _handle_join_clips_orchestrator_task
-from source.task_handlers.edit_video_orchestrator import _handle_edit_video_orchestrator_task
-from source.task_handlers.inpaint_frames import _handle_inpaint_frames_task
-from source.task_handlers.create_visualization import _handle_create_visualization_task
+from source.task_handlers.join.orchestrator import handle_join_clips_orchestrator_task
+from source.task_handlers.edit_video_orchestrator import handle_edit_video_orchestrator_task
+from source.task_handlers.inpaint_frames import handle_inpaint_frames_task
+from source.task_handlers.create_visualization import handle_create_visualization_task
 from source.task_handlers.travel.segment_processor import TravelSegmentProcessor, TravelSegmentContext
 from source.utils import (
     parse_resolution,
@@ -47,7 +50,6 @@ from source.utils import (
 )
 from source.media.video import extract_last_frame_as_image
 from source import db_operations as db_ops
-from headless_model_management import HeadlessTaskQueue, GenerationTask
 
 # Import centralized task type definitions
 from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
@@ -214,7 +216,10 @@ def _resolve_generation_inputs(ctx: SegmentContext, task_id: str, main_output_di
     parsed_res_raw = parse_resolution(parsed_res_wh_str)
     if parsed_res_raw is None:
         raise ValueError(f"Travel segment {task_id}: Invalid resolution format {parsed_res_wh_str}")
-    parsed_res_wh = snap_resolution_to_model_grid(parsed_res_raw, grid_size=get_model_grid_size(model_name))
+    from source.utils.resolution_utils import get_model_grid_size
+    model_name = segment_params.get("model_name") or orchestrator_details.get("model_name")
+    grid_size = get_model_grid_size(model_name)
+    parsed_res_wh = snap_resolution_to_model_grid(parsed_res_raw, grid_size)
 
     # Frame count: individual_segment_params.num_frames > top-level num_frames > segment_frames_target > segment_frames_expanded[idx]
     total_frames_for_segment = (
@@ -992,7 +997,7 @@ def handle_travel_segment_via_queue(task_params_dict: dict, main_output_dir_base
     log_ram_usage("Segment via queue - start", task_id=task_id)
 
     try:
-        from source.task_handlers.travel.chaining import _handle_travel_chaining_after_wgp
+        from source.task_handlers.travel.chaining import handle_travel_chaining_after_wgp
 
         # 1. Resolve segment context (mode, orchestrator_details, individual_params, segment_idx)
         ctx = _resolve_segment_context(task_params_dict, is_standalone, task_id)
@@ -1029,6 +1034,8 @@ def handle_travel_segment_via_queue(task_params_dict: dict, main_output_dir_base
         # This keeps logs, fatal error handling, and debug tooling consistent (no "travel_seg_" indirection).
         # We still include a hint in parameters so the queue can apply any task-type specific behavior.
         generation_params["_source_task_type"] = "travel_segment"
+        from headless_model_management import GenerationTask
+
         generation_task = GenerationTask(
             id=task_id,
             model=gen.model_name,
@@ -1053,7 +1060,7 @@ def handle_travel_segment_via_queue(task_params_dict: dict, main_output_dir_base
                     return True, status.result_path
 
                 # Orchestrator mode: run chaining
-                chain_success, chain_message, final_chained_path = _handle_travel_chaining_after_wgp(
+                chain_success, chain_message, final_chained_path = handle_travel_chaining_after_wgp(
                     wgp_task_params={
                         # Provide minimal ground-truth frame params for downstream debug logging / trimming analysis.
                         "use_svi": image_refs.use_svi,
@@ -1138,7 +1145,7 @@ class TaskRegistry:
                 task_queue=context["task_queue"],
                 is_standalone=True
             ),
-            "travel_stitch": lambda: _handle_travel_stitch_task(
+            "travel_stitch": lambda: handle_travel_stitch_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 stitch_task_id_str=task_id),
@@ -1146,12 +1153,12 @@ class TaskRegistry:
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 task_id=task_id),
-            "join_clips_orchestrator": lambda: _handle_join_clips_orchestrator_task(
+            "join_clips_orchestrator": lambda: handle_join_clips_orchestrator_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 orchestrator_task_id_str=task_id,
                 orchestrator_project_id=context["project_id"]),
-            "edit_video_orchestrator": lambda: _handle_edit_video_orchestrator_task(
+            "edit_video_orchestrator": lambda: handle_edit_video_orchestrator_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 orchestrator_task_id_str=task_id,
@@ -1165,12 +1172,12 @@ class TaskRegistry:
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 task_id=task_id),
-            "inpaint_frames": lambda: _handle_inpaint_frames_task(
+            "inpaint_frames": lambda: handle_inpaint_frames_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 task_id=task_id,
                 task_queue=context["task_queue"]),
-            "create_visualization": lambda: _handle_create_visualization_task(
+            "create_visualization": lambda: handle_create_visualization_task(
                 task_params_from_db=params,
                 main_output_dir_base=context["main_output_dir_base"],
                 viz_task_id_str=task_id),
@@ -1242,4 +1249,3 @@ class TaskRegistry:
         except (RuntimeError, ValueError, OSError) as e:
             task_logger.error(f"Queue error: {e}", exc_info=True)
             return False, f"Queue error: {e}"
-

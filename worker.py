@@ -53,7 +53,7 @@ from source.core.log import (
 from source.task_handlers.worker.worker_utils import cleanup_generated_files
 from source.task_handlers.worker.heartbeat_utils import start_heartbeat_guardian_process
 from source.task_handlers.tasks.task_registry import TaskRegistry
-from source.task_handlers.travel.chaining import _handle_travel_chaining_after_wgp
+from source.task_handlers.travel.chaining import handle_travel_chaining_after_wgp
 from source.models.lora.lora_utils import cleanup_legacy_lora_collisions
 from source.utils import prepare_output_path
 import shutil
@@ -155,7 +155,7 @@ def process_single_task(task_params_dict, main_output_dir_base: Path, task_type:
         chaining_result_path_override = None
 
         if task_params_dict.get("travel_chain_details"):
-            chain_success, chain_message, final_path_from_chaining = _handle_travel_chaining_after_wgp(
+            chain_success, chain_message, final_path_from_chaining = handle_travel_chaining_after_wgp(
                 wgp_task_params=task_params_dict,
                 actual_wgp_output_video_path=output_location_to_db,
                 image_download_dir=image_download_dir,
@@ -217,7 +217,7 @@ def parse_args():
     parser.add_argument("--supabase-url", type=str, default="https://wczysqzxlwdndgxitrvc.supabase.co")
     parser.add_argument("--reigh-access-token", type=str, default=None, help="Access token for Reigh API (preferred)")
     parser.add_argument("--supabase-access-token", type=str, default=None, help="Legacy alias for --reigh-access-token")
-    parser.add_argument("--supabase-anon-key", type=str, default="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndjenlzcXp4bHdkbmRneGl0cnZjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE1MDI4NjgsImV4cCI6MjA2NzA3ODg2OH0.r-4RyHZiDibUjgdgDDM2Vo6x3YpgIO5-BTwfkB2qyYA", help="Supabase anon key (set via env SUPABASE_ANON_KEY)")
+    parser.add_argument("--supabase-anon-key", type=str, default=None, help="Supabase anon key (set via env SUPABASE_ANON_KEY)")
     
     # WGP Globals
     parser.add_argument("--wgp-attention-mode", type=str, default=None)
@@ -243,7 +243,7 @@ def main():
     # Resolve access token: prefer --reigh-access-token, fall back to --supabase-access-token
     access_token = cli_args.reigh_access_token or cli_args.supabase_access_token
     if not access_token:
-        print("Error: Either --reigh-access-token or --supabase-access-token is required", file=sys.stderr)
+        print("Error: Worker authentication credential is required", file=sys.stderr)
         sys.exit(1)
 
     # Auto-derive worker_id when not explicitly provided

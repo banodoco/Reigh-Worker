@@ -29,7 +29,7 @@ from datetime import datetime
 # Add project to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from source.task_handlers.inpaint_frames import _handle_inpaint_frames_task
+from source.task_handlers.inpaint_frames import handle_inpaint_frames_task
 
 
 def run_inpaint_frames(
@@ -144,7 +144,7 @@ def run_inpaint_frames(
         start_time = time.time()
 
         # Call inpaint_frames handler directly
-        success, result = _handle_inpaint_frames_task(
+        success, result = handle_inpaint_frames_task(
             task_params_from_db=task_params,
             main_output_dir_base=output_dir.parent,
             task_id=task_id,
@@ -195,7 +195,7 @@ def run_inpaint_frames(
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
-        traceback.print_exc()
+        print(traceback.format_exc())
         return False
 
     finally:

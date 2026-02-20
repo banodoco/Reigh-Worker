@@ -84,3 +84,7 @@ def _extract_wgp_error(stdout_content: str, stderr_content: str) -> Optional[str
                     return line[:300]
 
     return None
+
+
+# Public alias for cross-module use.
+extract_wgp_error = _extract_wgp_error

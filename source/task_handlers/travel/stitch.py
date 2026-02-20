@@ -676,6 +676,23 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
 
                 current_stitched_video_path = create_video_from_frames_list(final_stitched_frames, path_for_raw_stitched_video, final_fps, parsed_res_wh)
 
+                # Attempt to restore audio from segment videos (e.g. LTX-2 generates audio)
+                audio_output = path_for_raw_stitched_video.with_name(
+                    path_for_raw_stitched_video.stem + "_with_audio.mp4"
+                )
+                audio_result = mux_audio_from_segments(
+                    silent_video=current_stitched_video_path,
+                    segment_videos=segment_video_paths_for_stitch,
+                    output_path=audio_output,
+                    overlap_frames=actual_overlaps_for_stitching,
+                    fps=final_fps,
+                )
+                if audio_result and audio_result.exists():
+                    # Replace silent video with audio version
+                    current_stitched_video_path.unlink(missing_ok=True)
+                    audio_result.rename(current_stitched_video_path)
+                    travel_logger.debug("Audio muxed from segment videos into stitched output", task_id=stitch_task_id_str)
+
             else:
                 travel_logger.debug(f"Stitch: Using simple FFmpeg concatenation. Output to: {path_for_raw_stitched_video}", task_id=stitch_task_id_str)
                 try:
@@ -928,3 +945,7 @@ def _handle_travel_stitch_task(task_params_from_db: dict, main_output_dir_base: 
 
         log_ram_usage("Stitch end (error)", task_id=stitch_task_id_str)
         return False, f"Stitch task failed: {str(e)[:200]}"
+
+
+# Public alias for cross-module use.
+handle_travel_stitch_task = _handle_travel_stitch_task

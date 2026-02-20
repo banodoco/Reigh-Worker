@@ -10,10 +10,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from headless_model_management import HeadlessTaskQueue, GenerationTask
+from typing import Any, Dict
 
 from source.core.log import is_debug_enabled
 
@@ -103,11 +100,11 @@ def convert_to_wgp_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask")
             os.chdir(queue.wan_dir)
 
         try:
-            from source.models.lora.lora_utils import _download_lora_from_url
+            from source.models.lora.lora_utils import download_lora_from_url
 
             for url, mult in list(config.lora.get_pending_downloads().items()):
                 try:
-                    local_path = _download_lora_from_url(url, task.id, model_type=task.model)
+                    local_path = download_lora_from_url(url, task.id, model_type=task.model)
                     if local_path:
                         config.lora.mark_downloaded(url, local_path)
                         queue.logger.info(f"[LORA_DOWNLOAD] Task {task.id}: Downloaded {os.path.basename(local_path)}")

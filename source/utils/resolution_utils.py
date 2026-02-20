@@ -34,6 +34,30 @@ def snap_resolution_to_model_grid(parsed_res: tuple[int, int], *, grid_size: int
     return width, height
 
 
+def get_model_grid_size(model_name: str | None) -> int:
+    """Get the VAE block size / grid alignment for a model.
+
+    Queries WGP's model handler when available, falls back to 16 (Wan default).
+    """
+    if not model_name:
+        return 16
+    try:
+        from wgp import get_model_def
+        model_def = get_model_def(model_name)
+        if model_def is None:
+            return 16
+        # Check model family handler for vae_block_size
+        family = model_def.get("family")
+        if family == "ltx2":
+            return 64
+    except (ImportError, TypeError, ValueError, KeyError, AttributeError):
+        pass
+    # Fallback: check model name heuristically
+    if model_name and "ltx2" in model_name.lower():
+        return 64
+    return 16
+
+
 def parse_resolution(res_str: str) -> tuple[int, int]:
     """Parses 'WIDTHxHEIGHT' string to (width, height) tuple."""
     try:

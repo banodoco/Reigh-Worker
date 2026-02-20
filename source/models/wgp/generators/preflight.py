@@ -95,7 +95,17 @@ def configure_model_specific_params(
         image_mode = 0
         actual_video_length = final_video_length
 
-        # Safety check: models crash if video_length is too short
+        # Safety check: models crash if video_length < frames_minimum
+        # (e.g. Wan needs >= 5, LTX-2 needs >= 17)
+        min_frames = 5  # Safe default
+        try:
+            from wgp import get_model_min_frames_and_step
+            _min, _step, _latent = get_model_min_frames_and_step(
+                resolved_params.get("model") or resolved_params.get("model_name", "")
+            )
+            min_frames = max(_min, 5)
+        except (ImportError, TypeError, ValueError, KeyError):
+            pass
         if actual_video_length < min_frames:
             generation_logger.warning(
                 f"[SAFETY] Boosting video_length from {actual_video_length} to {min_frames} "

@@ -334,3 +334,7 @@ def _handle_join_clips_orchestrator_task(
         msg = f"Failed during join orchestration: {e}"
         orchestrator_logger.debug(f"[JOIN_ORCHESTRATOR] ERROR: {msg}", exc_info=True)
         return False, msg
+
+
+# Public alias for cross-module use.
+handle_join_clips_orchestrator_task = _handle_join_clips_orchestrator_task

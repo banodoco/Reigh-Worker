@@ -20,7 +20,7 @@ def run(client, options: dict):
     
     runpod_api_key = os.getenv('RUNPOD_API_KEY')
     if not runpod_api_key:
-        print("❌ Error: RUNPOD_API_KEY not set in environment")
+        print("❌ Error: RunPod auth key not set in environment")
         sys.exit(1)
     
     runpod.api_key = runpod_api_key
@@ -140,9 +140,8 @@ def run(client, options: dict):
     except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
         print(f"❌ Error: {e}")
         import traceback
-        traceback.print_exc()
+        print(traceback.format_exc())
         sys.exit(1)
-
 
 
 

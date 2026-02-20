@@ -251,7 +251,7 @@ def _mark_worker_for_termination(
         
         if not supabase_url or not supabase_key:
             if logger:
-                logger.warning("Supabase credentials not available - cannot mark worker for termination")
+                logger.warning("Supabase auth configuration not available - cannot mark worker for termination")
             return False
         
         from supabase import create_client
@@ -480,4 +480,3 @@ def check_and_handle_fatal_error(
 
 # Backward compatibility alias
 safe_handle_fatal_error = check_and_handle_fatal_error
-

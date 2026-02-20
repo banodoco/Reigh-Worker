@@ -196,3 +196,7 @@ def cleanup_legacy_lora_collisions():
         model_logger.info(f"✅ Cleanup complete: removed {len(cleaned_files)} legacy LoRA file(s)")
     else:
         model_logger.debug("No legacy LoRA files found to clean up")
+
+
+# Public alias for cross-module use.
+download_lora_from_url = _download_lora_from_url

@@ -46,7 +46,7 @@ def init_db_supabase():
 def check_task_counts_supabase(run_type: str = "gpu") -> dict | None:
     """Check task counts via Supabase Edge Function before attempting to claim tasks."""
     if not _cfg.SUPABASE_CLIENT or not _cfg.SUPABASE_ACCESS_TOKEN:
-        headless_logger.error("[TASK_COUNTS] Supabase client or access token not initialized")
+        headless_logger.error("[TASK_COUNTS] Supabase client or auth configuration not initialized")
         return None
 
     # Build task-counts edge function URL using same pattern as other functions
@@ -333,7 +333,7 @@ def get_oldest_queued_task_supabase(worker_id: str = None):
                 return deferred_orchestrator_recovery
             return None
     else:
-        headless_logger.error("[CLAIM] No edge function URL or access token available for task claiming")
+        headless_logger.error("[CLAIM] No edge function URL or auth configuration available for task claiming")
         if deferred_orchestrator_recovery:
             return deferred_orchestrator_recovery
         return None

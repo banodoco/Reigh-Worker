@@ -112,5 +112,5 @@ def run(client: DebugClient, worker_id: str, options: dict):
         print(f"❌ Error investigating worker: {e}")
         import traceback
         if options.get('debug'):
-            traceback.print_exc()
+            print(traceback.format_exc())
 

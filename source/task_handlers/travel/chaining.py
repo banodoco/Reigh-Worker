@@ -435,3 +435,7 @@ def _cleanup_intermediate_video(orchestrator_payload, video_path: Path, segment_
             travel_logger.debug(f"Chain (Seg {segment_idx}): Removed intermediate '{stage}' video {video_path}", task_id=task_id)
         except OSError as e_del:
             travel_logger.debug(f"Chain (Seg {segment_idx}): Warning - could not remove intermediate video {video_path}: {e_del}", task_id=task_id)
+
+
+# Public alias for cross-module use.
+handle_travel_chaining_after_wgp = _handle_travel_chaining_after_wgp

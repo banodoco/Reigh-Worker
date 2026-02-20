@@ -7,15 +7,12 @@ generation task completes, without unloading models from VRAM.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from headless_model_management import HeadlessTaskQueue
+from typing import Any
 
 from source.core.constants import BYTES_PER_GB as BYTES_PER_GIB
 
 
-def cleanup_memory_after_task(queue: "HeadlessTaskQueue", task_id: str):
+def cleanup_memory_after_task(queue: Any, task_id: str):
     """
     Clean up memory after task completion WITHOUT unloading models.
 

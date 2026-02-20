@@ -20,6 +20,9 @@ __all__ = [
     "_extract_boundary_frames_for_vlm",
     "_generate_join_transition_prompt",
     "_generate_vlm_prompts_for_joins",
+    "extract_boundary_frames_for_vlm",
+    "generate_join_transition_prompt",
+    "generate_vlm_prompts_for_joins",
 ]
 
 def _extract_boundary_frames_for_vlm(
@@ -319,3 +322,9 @@ def _generate_vlm_prompts_for_joins(
     except (RuntimeError, ValueError, OSError, ImportError) as e:
         orchestrator_logger.debug(f"[VLM_PROMPTS] ERROR in VLM processing: {e}", exc_info=True)
         return result
+
+
+# Public aliases for cross-module use.
+extract_boundary_frames_for_vlm = _extract_boundary_frames_for_vlm
+generate_join_transition_prompt = _generate_join_transition_prompt
+generate_vlm_prompts_for_joins = _generate_vlm_prompts_for_joins

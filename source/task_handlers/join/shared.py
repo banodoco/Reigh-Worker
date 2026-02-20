@@ -16,6 +16,9 @@ __all__ = [
     "_check_orchestrator_cancelled",
     "_extract_join_settings_from_payload",
     "_check_existing_join_tasks",
+    "check_orchestrator_cancelled",
+    "extract_join_settings_from_payload",
+    "check_existing_join_tasks",
 ]
 
 
@@ -180,3 +183,9 @@ def _check_existing_join_tasks(
         complete_count = sum(1 for j in existing_joins if is_complete(j))
         task_logger.debug(f"[JOIN_CORE] IDEMPOTENT: {complete_count}/{num_joins} joins complete", task_id=orchestrator_task_id_str)
         return TaskResult.orchestrating(f"Join tasks in progress: {complete_count}/{num_joins} complete")
+
+
+# Public aliases for cross-module use.
+check_orchestrator_cancelled = _check_orchestrator_cancelled
+extract_join_settings_from_payload = _extract_join_settings_from_payload
+check_existing_join_tasks = _check_existing_join_tasks
