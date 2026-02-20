@@ -342,8 +342,7 @@ class WanOrchestrator:
             # Initialize model defaults using upstream get_default_settings + set_model_settings
             try:
                 orchestrator_logger.debug("Initializing WGP defaults via get_default_settings/set_model_settings...")
-                defaults = self._get_default_settings(default_model_type)
-                self._set_model_settings(self.state, default_model_type, defaults)
+                self._apply_model_settings_overrides(default_model_type)
                 orchestrator_logger.debug("WGP defaults initialized successfully")
             except (RuntimeError, ValueError, TypeError, KeyError) as e:
                 orchestrator_logger.error(f"FATAL: WGP default settings init failed: {e}\n{traceback.format_exc()}")
@@ -847,6 +846,15 @@ class WanOrchestrator:
     # Private helpers (keep generate() readable)
     # ------------------------------------------------------------------
 
+    def _apply_model_settings_overrides(self, model_type: str, overrides: Optional[dict] = None) -> dict:
+        """Apply settings via upstream get_default_settings/set_model_settings with optional overrides."""
+        defaults = self._get_default_settings(model_type)
+        merged = dict(defaults or {})
+        if overrides:
+            merged.update({k: v for k, v in overrides.items() if v is not None})
+        self._set_model_settings(self.state, model_type, merged)
+        return merged
+
     def _build_task_params(self, *, prompt, resolution, video_length,
                            num_inference_steps, guidance_scale, seed,
                            video_guide, video_mask, video_prompt_type,
@@ -913,8 +921,30 @@ class WanOrchestrator:
             _dropped = sorted(set(wgp_params.keys()) - _allowed)
             if _dropped:
                 generation_logger.debug(f"[PARAM_SANITIZE] Dropping unsupported params: {_dropped}")
+
+            # Fail fast for critical Uni3C options to avoid silent no-op behavior.
+            uni3c_keys = {
+                "use_uni3c",
+                "uni3c_guide_video",
+                "uni3c_strength",
+                "uni3c_start_percent",
+                "uni3c_end_percent",
+                "uni3c_keep_on_gpu",
+                "uni3c_frame_policy",
+                "uni3c_zero_empty_frames",
+                "uni3c_blackout_last_frame",
+                "uni3c_controlnet",
+            }
+            dropped_uni3c = sorted(uni3c_keys.intersection(_dropped))
+            if wgp_params.get("use_uni3c") and dropped_uni3c:
+                raise RuntimeError(
+                    "[UNI3C] Unsupported Uni3C params dropped by WGP signature filter: "
+                    f"{dropped_uni3c}. Refusing to run with silent Uni3C degradation."
+                )
             return _filtered
-        except (ValueError, TypeError, RuntimeError) as _e:
+        except RuntimeError:
+            raise
+        except (ValueError, TypeError) as _e:
             return wgp_params
 
     def _log_final_params(self, filtered_params: dict) -> None:

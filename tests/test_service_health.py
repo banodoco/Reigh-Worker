@@ -32,15 +32,17 @@ class TestTaskTypeIntegrity:
 
     def test_direct_queue_count(self):
         from source.task_handlers.tasks.task_types import DIRECT_QUEUE_TASK_TYPES
-        assert len(DIRECT_QUEUE_TASK_TYPES) == 22, (
-            f"DIRECT_QUEUE_TASK_TYPES has {len(DIRECT_QUEUE_TASK_TYPES)} entries, expected 22. "
+        # PR #19 adds two direct task types: ltx2_ic_multiframe and z_image_turbo_i2i.
+        assert len(DIRECT_QUEUE_TASK_TYPES) == 24, (
+            f"DIRECT_QUEUE_TASK_TYPES has {len(DIRECT_QUEUE_TASK_TYPES)} entries, expected 24. "
             f"Contents: {sorted(DIRECT_QUEUE_TASK_TYPES)}"
         )
 
     def test_wgp_task_count(self):
         from source.task_handlers.tasks.task_types import WGP_TASK_TYPES
-        assert len(WGP_TASK_TYPES) == 20, (
-            f"WGP_TASK_TYPES has {len(WGP_TASK_TYPES)} entries, expected 20. "
+        # PR #19 adds two WGP task types: ltx2_ic_multiframe and z_image_turbo_i2i.
+        assert len(WGP_TASK_TYPES) == 22, (
+            f"WGP_TASK_TYPES has {len(WGP_TASK_TYPES)} entries, expected 22. "
             f"Contents: {sorted(WGP_TASK_TYPES)}"
         )
 
@@ -174,6 +176,52 @@ class TestModelConfigHealth:
     def test_ltxv_config_exists(self):
         """ltxv_13B.json must exist."""
         assert (self.DEFAULTS_DIR / "ltxv_13B.json").is_file()
+
+    def test_legacy_compat_default_configs_exist(self):
+        """Legacy default IDs required by task mappings must remain present."""
+        required = [
+            "wan_2_2_i2v_lightning_baseline_2_2_2.json",
+            "wan_2_2_i2v_lightning_baseline_3_3.json",
+            "wan_2_2_i2v_lightning_svi_3_3.json",
+            "wan_2_2_i2v_lightning_svi_endframe.json",
+            "wan_2_2_vace_lightning_baseline_2_2_2.json",
+            "wan_2_2_vace_lightning_baseline_3_3.json",
+            "z_image_img2img.json",
+        ]
+        missing = [name for name in required if not (self.DEFAULTS_DIR / name).is_file()]
+        assert not missing, f"Missing legacy compatibility config files: {missing}"
+
+    def test_legacy_compat_default_configs_parse_and_define_model(self):
+        """Compatibility configs should parse and include a model section."""
+        required = [
+            "wan_2_2_i2v_lightning_baseline_2_2_2.json",
+            "wan_2_2_i2v_lightning_baseline_3_3.json",
+            "wan_2_2_i2v_lightning_svi_3_3.json",
+            "wan_2_2_i2v_lightning_svi_endframe.json",
+            "wan_2_2_vace_lightning_baseline_2_2_2.json",
+            "wan_2_2_vace_lightning_baseline_3_3.json",
+            "z_image_img2img.json",
+        ]
+        for name in required:
+            cfg = json.loads((self.DEFAULTS_DIR / name).read_text(encoding="utf-8"))
+            assert "model" in cfg, f"{name} missing 'model' key"
+
+    def test_task_type_mapping_references_legacy_compat_ids(self):
+        """Task defaults must keep legacy compatibility model IDs."""
+        task_types_src = (
+            PROJECT_ROOT / "source" / "task_handlers" / "tasks" / "task_types.py"
+        ).read_text(encoding="utf-8")
+        assert '"join_clips_segment": "wan_2_2_vace_lightning_baseline_2_2_2"' in task_types_src
+        assert '"inpaint_frames": "wan_2_2_vace_lightning_baseline_2_2_2"' in task_types_src
+        assert '"z_image_turbo_i2i": "z_image_img2img"' in task_types_src
+
+    def test_segment_processor_vace_detection_is_strict(self):
+        """VACE detection should not use broad keywords like 'lightning'."""
+        src = (
+            PROJECT_ROOT / "source" / "task_handlers" / "travel" / "segment_processor.py"
+        ).read_text(encoding="utf-8")
+        assert 'is_vace = "vace" in model_name' in src
+        assert "vace_indicators" not in src
 
 
 # ---------------------------------------------------------------------------
