@@ -72,10 +72,13 @@ samples/
 tests/
 tests_output/
 
-# Keep tests ignored by default, but allow tracking specific regression tests
+# Track all test files
 !tests/
-tests/*
-!tests/test_lora_flow.py
+!tests/README.md
+tests/*.jpg
+tests/*.png
+tests/*.jpeg
+tests/outputs_ltx2_lora/
 
 # Task database files
 tasks.db-shm

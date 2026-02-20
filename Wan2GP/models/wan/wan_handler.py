@@ -6,7 +6,7 @@ import numpy as np
 import gradio as gr
 import cv2
 from PIL import Image
-from shared.utils import files_locator as fl 
+from shared.utils.hf import build_hf_url
 
 def test_vace(base_model_type):
     return base_model_type in ["vace_14B", "vace_14B_2_2", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B", "vace_ditto_14B"]     
@@ -89,45 +89,45 @@ class family_handler():
         return {"wan":(0, "Wan2.1"), "wan2_2":(1, "Wan2.2") }
 
     @staticmethod
-    def register_lora_cli_args(parser):
+    def register_lora_cli_args(parser, lora_root):
         parser.add_argument(
             "--lora-dir-i2v",
             type=str,
-            default=os.path.join("loras", "wan_i2v"),
-            help="Path to a directory that contains Wan i2v Loras "
+            default=None,
+            help=f"Path to a directory that contains Wan i2v Loras (default: {os.path.join(lora_root, 'wan_i2v')})"
         )
         parser.add_argument(
             "--lora-dir",
             type=str,
-            default=os.path.join("loras", "wan"),
-            help="Path to a directory that contains Wan t2v Loras"
+            default=None,
+            help=f"Path to a directory that contains Wan t2v Loras (default: {os.path.join(lora_root, 'wan')})"
         )
         parser.add_argument(
             "--lora-dir-wan-1-3b",
             type=str,
-            default=os.path.join("loras", "wan_1.3B"),
-            help="Path to a directory that contains Wan 1.3B Loras"
+            default=None,
+            help=f"Path to a directory that contains Wan 1.3B Loras (default: {os.path.join(lora_root, 'wan_1.3B')})"
         )
         parser.add_argument(
             "--lora-dir-wan-5b",
             type=str,
-            default=os.path.join("loras", "wan_5B"),
-            help="Path to a directory that contains Wan 5B Loras"
+            default=None,
+            help=f"Path to a directory that contains Wan 5B Loras (default: {os.path.join(lora_root, 'wan_5B')})"
         )
         parser.add_argument(
             "--lora-dir-wan-i2v",
             type=str,
-            default=os.path.join("loras", "wan_i2v"),
-            help="Path to a directory that contains Wan i2v Loras"
+            default=None,
+            help=f"Path to a directory that contains Wan i2v Loras (default: {os.path.join(lora_root, 'wan_i2v')})"
         )
 
     @staticmethod
-    def get_lora_dir(base_model_type, args):
+    def get_lora_dir(base_model_type, args, lora_root):
         i2v = test_class_i2v(base_model_type) and not test_i2v_2_2(base_model_type)
-        wan_dir = getattr(args, "lora_dir_wan", None) or getattr(args, "lora_dir", None) or os.path.join("loras", "wan")
-        wan_i2v_dir = getattr(args, "lora_dir_wan_i2v", None) or getattr(args, "lora_dir_i2v", None) or os.path.join("loras", "wan_i2v")
-        wan_1_3b_dir = getattr(args, "lora_dir_wan_1_3b", None) or os.path.join("loras", "wan_1.3B")
-        wan_5b_dir = getattr(args, "lora_dir_wan_5b", None) or os.path.join("loras", "wan_5B")
+        wan_dir = getattr(args, "lora_dir_wan", None) or getattr(args, "lora_dir", None) or os.path.join(lora_root, "wan")
+        wan_i2v_dir = getattr(args, "lora_dir_wan_i2v", None) or getattr(args, "lora_dir_i2v", None) or os.path.join(lora_root, "wan_i2v")
+        wan_1_3b_dir = getattr(args, "lora_dir_wan_1_3b", None) or os.path.join(lora_root, "wan_1.3B")
+        wan_5b_dir = getattr(args, "lora_dir_wan_5b", None) or os.path.join(lora_root, "wan_5B")
 
         if i2v:
             return wan_i2v_dir
@@ -183,17 +183,17 @@ class family_handler():
             skip_steps_cache.coefficients = coefficients
 
     @staticmethod
-    def get_wan_text_encoder_filename(text_encoder_quantization):
-        text_encoder_filename =  "umt5-xxl/models_t5_umt5-xxl-enc-bf16.safetensors"
-        if text_encoder_quantization =="int8":
-            text_encoder_filename = text_encoder_filename.replace("bf16", "quanto_int8") 
-        return  fl.locate_file(text_encoder_filename, True)
-
-    @staticmethod
     def query_model_def(base_model_type, model_def):
         extra_model_def = {}
         if "URLs2" in model_def:
             extra_model_def["no_steps_skipping"] = True
+            extra_model_def["compile"] = ["transformer","transformer2"]
+        text_encoder_folder = "umt5-xxl"
+        extra_model_def["text_encoder_URLs"] = [
+            build_hf_url("DeepBeepMeep/Wan2.1", text_encoder_folder, "models_t5_umt5-xxl-enc-bf16.safetensors"),
+            build_hf_url("DeepBeepMeep/Wan2.1", text_encoder_folder, "models_t5_umt5-xxl-enc-quanto_int8.safetensors"),
+        ]
+        extra_model_def["text_encoder_folder"] = text_encoder_folder
         extra_model_def["i2v_class"] = i2v =  test_class_i2v(base_model_type)
         extra_model_def["t2v_class"] = t2v =  test_class_t2v(base_model_type)
         extra_model_def["multitalk_class"] = multitalk = test_multitalk(base_model_type)
@@ -214,6 +214,9 @@ class family_handler():
 
         if base_model_type in ["vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B"]:
             extra_model_def["parent_model_type"] = "vace_14B"
+
+        if base_model_type in ["alpha2"]:
+            extra_model_def["parent_model_type"] = "alpha"
 
         group = "wan"
         if base_model_type in ["t2v_2_2", "vace_14B_2_2"] or test_i2v_2_2(base_model_type):
@@ -277,6 +280,8 @@ class family_handler():
                             ("lcm + ltx", "lcm"), ]
         })
 
+        extra_model_def["self_refiner"] = True
+
         if i2v:
             extra_model_def["motion_amplitude"] = True
  
@@ -306,6 +311,7 @@ class family_handler():
                         "show_label" : False,
                 }
                 extra_model_def["all_image_refs_are_background_ref"] = True
+                extra_model_def["no_background_removal"] = True
                 extra_model_def["parent_model_type"] = "i2v_2_2"
 
 
@@ -673,17 +679,17 @@ class family_handler():
         return latent_rgb_factors, latent_rgb_factors_bias
     
     @staticmethod
-    def query_model_files(computeList, base_model_type, model_filename, text_encoder_quantization):
-        text_encoder_filename = family_handler.get_wan_text_encoder_filename(text_encoder_quantization)
-
+    def query_model_files(computeList, base_model_type, model_def=None):
         if test_wan_5B(base_model_type):
             wan_files = []
         else:
-            wan_files = ["Wan2.1_VAE.safetensors",  "fantasy_proj_model.safetensors", "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"]
+            wan_files = ["Wan2.1_VAE.safetensors", "Wan2.1_VAE_upscale2x_imageonly_real_v1.safetensors"]
+            if base_model_type in ["fantasy"]:
+                wan_files.append("fantasy_proj_model.safetensors")
         download_def  = [{
             "repoId" : "DeepBeepMeep/Wan2.1", 
             "sourceFolderList" :  ["xlm-roberta-large", "umt5-xxl", ""  ],
-            "fileList" : [ [ "models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"], ["special_tokens_map.json", "spiece.model", "tokenizer.json", "tokenizer_config.json"] + computeList(text_encoder_filename) , wan_files +  computeList(model_filename)  ]   
+            "fileList" : [ [ "models_clip_open-clip-xlm-roberta-large-vit-huge-14-bf16.safetensors", "sentencepiece.bpe.model", "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json"], ["special_tokens_map.json", "spiece.model", "tokenizer.json", "tokenizer_config.json"], wan_files ]   
         }]
 
         if base_model_type == "scail":
@@ -745,7 +751,7 @@ class family_handler():
 
 
     @staticmethod
-    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized= False, submodel_no_list = None, override_text_encoder = None, VAE_upsampling = None, **kwargs):
+    def load_model(model_filename, model_type, base_model_type, model_def, quantizeTransformer = False, text_encoder_quantization = None, dtype = torch.bfloat16, VAE_dtype = torch.float32, mixed_precision_transformer = False, save_quantized= False, submodel_no_list = None, text_encoder_filename = None, VAE_upsampling = None, **kwargs):
         from .configs import WAN_CONFIGS
 
         if test_class_i2v(base_model_type):
@@ -762,7 +768,7 @@ class family_handler():
             model_type = model_type,        
             model_def = model_def,
             base_model_type=base_model_type,
-            text_encoder_filename= family_handler.get_wan_text_encoder_filename(text_encoder_quantization) if override_text_encoder is None else override_text_encoder,
+            text_encoder_filename= text_encoder_filename,
             quantizeTransformer = quantizeTransformer,
             dtype = dtype,
             VAE_dtype = VAE_dtype, 
@@ -784,7 +790,7 @@ class family_handler():
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         if ui_defaults.get("sample_solver", "") == "": 
             ui_defaults["sample_solver"] = "unipc"
-
+        
         if settings_version < 2.24:
             if (model_def.get("multiple_submodels", False) or ui_defaults.get("switch_threshold", 0) > 0) and ui_defaults.get("guidance_phases",0)<2:
                 ui_defaults["guidance_phases"] = 2
@@ -859,6 +865,13 @@ class family_handler():
                 "sliding_window_size": 81, 
                 "sliding_window_overlap" : 4,
             })
+
+        if model_def.get("self_refiner",False) and settings_version < 2.47:
+            ui_defaults["self_refiner_setting"] = 0
+            ui_defaults["self_refiner_plan"] = ""
+        if model_def.get("self_refiner",False) and settings_version < 2.48:
+            ui_defaults["self_refiner_f_uncertainty"] = 0.1
+            ui_defaults["self_refiner_certain_percentage"] = 0.999
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
@@ -979,6 +992,11 @@ class family_handler():
             ui_defaults.update({
                 "sliding_window_size": 81, 
                 "sliding_window_overlap" : 4,
+            })
+            
+        if test_wan_5B(base_model_type):
+            ui_defaults.update({
+                "sliding_window_size": 121, 
             })
 
         if base_model_type in ["i2v_2_2"]:

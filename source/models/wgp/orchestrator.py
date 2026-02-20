@@ -41,6 +41,7 @@ from source.models.wgp.generation_helpers import (
     is_model_vace as _is_model_vace_impl,
     is_flux as _is_flux_impl,
     is_t2v as _is_t2v_impl,
+    is_ltx2 as _is_ltx2_impl,
     is_qwen as _is_qwen_impl,
 )
 
@@ -76,10 +77,8 @@ from source.core.log import is_debug_enabled
 def _set_wgp_output_paths(wgp_module, output_dir: str) -> None:
     """Set output paths on WGP module-level state and server_config dict.
 
-    Must be called both BEFORE and AFTER apply_changes() because
-    apply_changes() resets certain internal state. The WGP vendored
-    code reads these paths at initialization AND at generation time,
-    so both calls are required to ensure correct output locations.
+    Must be called after initializing WGP defaults. The WGP vendored
+    code reads these paths at initialization AND at generation time.
     """
     if not hasattr(wgp_module, 'server_config'):
         wgp_module.server_config = {}
@@ -234,7 +233,7 @@ class WanOrchestrator:
                 sys.argv = ["headless_wgp.py"]
                 from wgp import (
                     generate_video, get_base_model_type, get_model_family,
-                    test_vace_module, apply_changes
+                    test_vace_module, get_default_settings, set_model_settings
                 )
 
                 # Verify directory didn't change during wgp import
@@ -245,7 +244,8 @@ class WanOrchestrator:
                 self._get_base_model_type = get_base_model_type
                 self._get_model_family = get_model_family
                 self._test_vace_module = test_vace_module
-                self._apply_changes = apply_changes
+                self._get_default_settings = get_default_settings
+                self._set_model_settings = set_model_settings
 
                 # Apply WGP monkeypatches for headless operation (Qwen support, LoRA fixes, etc.)
                 import wgp as wgp
@@ -271,7 +271,7 @@ class WanOrchestrator:
                     if not hasattr(wgp, attr):
                         setattr(wgp, attr, default)
 
-                # Set output paths on WGP (first call — before apply_changes)
+                # Set output paths on WGP (initial call before defaults init)
                 _set_wgp_output_paths(wgp, absolute_outputs_path)
                 model_logger.info(f"[OUTPUT_DIR] Set output paths to {absolute_outputs_path}")
 
@@ -339,43 +339,38 @@ class WanOrchestrator:
                 default_model_type = "t2v"
             self.state["model_type"] = default_model_type
 
-            # Upstream apply_changes signature accepts a single save_path_choice
-            outputs_dir = "outputs/"
+            # Initialize model defaults using upstream get_default_settings + set_model_settings
             try:
-                orchestrator_logger.debug("Calling wgp.apply_changes() to initialize defaults...")
-                self._apply_changes(
-                    self.state,
-                    transformer_types_choices=["t2v"],
-                    transformer_dtype_policy_choice="auto",
-                    text_encoder_quantization_choice="bf16",
-                    VAE_precision_choice="fp32",
-                    mixed_precision_choice=0,
-                    save_path_choice=outputs_dir,
-                    image_save_path_choice=outputs_dir,
-                    attention_choice="auto",
-                    compile_choice="",
-                    profile_choice=1,  # Profile 1 for 24GB+ VRAM (4090/3090)
-                    vae_config_choice="default",
-                    metadata_choice="none",
-                    quantization_choice="int8",
-                    preload_model_policy_choice=[]
-                )
-                orchestrator_logger.debug("wgp.apply_changes() completed successfully")
+                orchestrator_logger.debug("Initializing WGP defaults via get_default_settings/set_model_settings...")
+                self._apply_model_settings_overrides(default_model_type)
+                orchestrator_logger.debug("WGP defaults initialized successfully")
             except (RuntimeError, ValueError, TypeError, KeyError) as e:
-                orchestrator_logger.error(f"FATAL: wgp.apply_changes() failed: {e}\n{traceback.format_exc()}")
-                raise RuntimeError(f"Failed to apply WGP defaults during orchestrator init: {e}") from e
+                orchestrator_logger.error(f"FATAL: WGP default settings init failed: {e}\n{traceback.format_exc()}")
+                raise RuntimeError(f"Failed to initialize WGP defaults during orchestrator init: {e}") from e
 
-            # Verify directory after apply_changes (it may have done file operations)
-            _verify_wgp_directory(orchestrator_logger, "after apply_changes()")
+            _verify_wgp_directory(orchestrator_logger, "after initializing defaults")
 
-            # Set output paths again (second call — after apply_changes)
-            _set_wgp_output_paths(wgp, absolute_outputs_path)
-            orchestrator_logger.info(f"[OUTPUT_DIR] Re-applied output paths after apply_changes(): {absolute_outputs_path}")
+            # Set output paths in both server_config dict and module-level vars
+            orchestrator_logger.info(f"[OUTPUT_DIR] Applying output directory configuration...")
+            wgp.server_config['save_path'] = absolute_outputs_path
+            wgp.server_config['image_save_path'] = absolute_outputs_path
+            wgp.save_path = absolute_outputs_path
+            wgp.image_save_path = absolute_outputs_path
+            orchestrator_logger.info(f"[OUTPUT_DIR] Final: dict={{save_path={wgp.server_config['save_path']}, image_save_path={wgp.server_config['image_save_path']}}}, module={{save_path={wgp.save_path}, image_save_path={wgp.image_save_path}}}")
 
         else:
             # Provide stubbed helpers for smoke mode
-            self._get_base_model_type = lambda model_key: ("t2v" if "flux" not in (model_key or "") else "flux")
-            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else "T2V"))
+            def _smoke_get_base_model_type(model_key):
+                mk = (model_key or "").lower()
+                if "flux" in mk:
+                    return "flux"
+                if mk.startswith("ltx2"):
+                    return "ltx2_19B"
+                if mk.startswith("qwen"):
+                    return "qwen"
+                return "t2v"
+            self._get_base_model_type = _smoke_get_base_model_type
+            self._get_model_family = lambda model_key, for_ui=False: ("VACE" if "vace" in (model_key or "") else ("Flux" if "flux" in (model_key or "") else ("LTX2" if "ltx2" in (model_key or "").lower() else "T2V")))
             self._test_vace_module = lambda model_name: ("vace" in (model_name or ""))
         self.current_model = None
         self.offloadobj = None  # Store WGP's offload object
@@ -434,6 +429,10 @@ class WanOrchestrator:
     def _is_qwen(self) -> bool:
         """Check if current model is a Qwen image model. Delegates to source.models.wgp.generation_helpers."""
         return _is_qwen_impl(self)
+
+    def _is_ltx2(self) -> bool:
+        """Check if current model is an LTX-2 model. Delegates to source.models.wgp.generation_helpers."""
+        return _is_ltx2_impl(self)
 
     def _get_or_load_uni3c_controlnet(self):
         """Get cached Uni3C controlnet. Delegates to source.models.wgp.model_ops."""
@@ -520,6 +519,75 @@ class WanOrchestrator:
         # SVI / Image-Refs Path Bridging
         prepare_svi_image_refs(kwargs)
 
+        # ------------------------------------------------------------------
+        # LTX-2 Image / Audio Parameter Bridging
+        # ------------------------------------------------------------------
+        try:
+            from PIL import Image as _PILImage, ImageOps as _ImageOps
+
+            # start_image → image_start (PIL)
+            _si = kwargs.pop("start_image", None)
+            if _si and isinstance(_si, str) and "image_start" not in kwargs:
+                try:
+                    _img = _PILImage.open(_si).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_start"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted start_image path → image_start PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load start_image '{_si}': {_e}")
+
+            # end_image → image_end (PIL)
+            _ei = kwargs.pop("end_image", None)
+            if _ei and isinstance(_ei, str) and "image_end" not in kwargs:
+                try:
+                    _img = _PILImage.open(_ei).convert("RGB")
+                    _img = _ImageOps.exif_transpose(_img)
+                    kwargs["image_end"] = _img
+                    generation_logger.info(f"[LTX2_BRIDGE] Converted end_image path → image_end PIL ({_img.size})")
+                except Exception as _e:
+                    generation_logger.warning(f"[LTX2_BRIDGE] Failed to load end_image '{_ei}': {_e}")
+
+            # audio_input → audio_guide
+            _ai = kwargs.pop("audio_input", None)
+            if _ai and isinstance(_ai, str) and "audio_guide" not in kwargs:
+                kwargs["audio_guide"] = _ai
+                generation_logger.info(f"[LTX2_BRIDGE] Mapped audio_input → audio_guide: {_ai}")
+
+            # guide_images bridging: convert paths to PIL images
+            _gi = kwargs.get("guide_images")
+            if _gi and isinstance(_gi, list):
+                bridged = []
+                for entry in _gi:
+                    img_path, frame_idx, strength = entry["image"], entry["frame_idx"], entry.get("strength", 1.0)
+                    if isinstance(img_path, str):
+                        _img = _PILImage.open(img_path).convert("RGB")
+                        _img = _ImageOps.exif_transpose(_img)
+                        bridged.append((_img, frame_idx, strength))
+                    else:
+                        bridged.append((img_path, frame_idx, strength))
+                kwargs["guide_images"] = bridged
+                generation_logger.info(f"[LTX2_BRIDGE] Converted {len(bridged)} guide_images to PIL")
+
+            # Auto-detect image_prompt_type for LTX-2 when not explicitly set
+            base_type_check = (self._get_base_model_type(self.current_model) or "").lower()
+            if base_type_check.startswith("ltx2") and "image_prompt_type" not in kwargs:
+                has_start = kwargs.get("image_start") is not None
+                has_end = kwargs.get("image_end") is not None
+                has_guides = bool(kwargs.get("guide_images"))
+                if has_start and has_end:
+                    kwargs["image_prompt_type"] = "TSE"
+                elif has_start:
+                    kwargs["image_prompt_type"] = "TS"
+                elif has_end:
+                    kwargs["image_prompt_type"] = "TE"
+                elif has_guides:
+                    kwargs["image_prompt_type"] = "T"
+                else:
+                    kwargs["image_prompt_type"] = "T"
+                generation_logger.info(f"[LTX2_BRIDGE] Auto-detected image_prompt_type='{kwargs['image_prompt_type']}' (start={has_start}, end={has_end}, guides={has_guides})")
+        except ImportError:
+            pass  # PIL not available yet; images handled downstream
+
         # Smoke-mode short-circuit
         if self.smoke_mode:
             return self._generate_smoke(prompt)
@@ -566,11 +634,13 @@ class WanOrchestrator:
         if is_vace:
             if not video_prompt_type:
                 video_prompt_type = "VP"
-            if control_net_weight is None:
-                control_net_weight = 1.0
-            if control_net_weight2 is None:
-                control_net_weight2 = 1.0
             generation_logger.debug(f"VACE parameters - guide: {video_guide}, type: {video_prompt_type}, weights: {control_net_weight}/{control_net_weight2}")
+
+        # Default control_net weights for any model (VACE, LTX-2, etc.)
+        if control_net_weight is None:
+            control_net_weight = 1.0
+        if control_net_weight2 is None:
+            control_net_weight2 = 1.0
 
         # Resolve media paths before validation
         video_guide = self._resolve_media_path(video_guide)
@@ -597,6 +667,7 @@ class WanOrchestrator:
             video_prompt_type=video_prompt_type,
             control_net_weight=control_net_weight,
             control_net_weight2=control_net_weight2,
+            min_frames=17 if self._is_ltx2() else 5,
         )
         image_mode = model_params["image_mode"]
         actual_video_length = model_params["actual_video_length"]
@@ -775,6 +846,15 @@ class WanOrchestrator:
     # Private helpers (keep generate() readable)
     # ------------------------------------------------------------------
 
+    def _apply_model_settings_overrides(self, model_type: str, overrides: Optional[dict] = None) -> dict:
+        """Apply settings via upstream get_default_settings/set_model_settings with optional overrides."""
+        defaults = self._get_default_settings(model_type)
+        merged = dict(defaults or {})
+        if overrides:
+            merged.update({k: v for k, v in overrides.items() if v is not None})
+        self._set_model_settings(self.state, model_type, merged)
+        return merged
+
     def _build_task_params(self, *, prompt, resolution, video_length,
                            num_inference_steps, guidance_scale, seed,
                            video_guide, video_mask, video_prompt_type,
@@ -841,8 +921,30 @@ class WanOrchestrator:
             _dropped = sorted(set(wgp_params.keys()) - _allowed)
             if _dropped:
                 generation_logger.debug(f"[PARAM_SANITIZE] Dropping unsupported params: {_dropped}")
+
+            # Fail fast for critical Uni3C options to avoid silent no-op behavior.
+            uni3c_keys = {
+                "use_uni3c",
+                "uni3c_guide_video",
+                "uni3c_strength",
+                "uni3c_start_percent",
+                "uni3c_end_percent",
+                "uni3c_keep_on_gpu",
+                "uni3c_frame_policy",
+                "uni3c_zero_empty_frames",
+                "uni3c_blackout_last_frame",
+                "uni3c_controlnet",
+            }
+            dropped_uni3c = sorted(uni3c_keys.intersection(_dropped))
+            if wgp_params.get("use_uni3c") and dropped_uni3c:
+                raise RuntimeError(
+                    "[UNI3C] Unsupported Uni3C params dropped by WGP signature filter: "
+                    f"{dropped_uni3c}. Refusing to run with silent Uni3C degradation."
+                )
             return _filtered
-        except (ValueError, TypeError, RuntimeError) as _e:
+        except RuntimeError:
+            raise
+        except (ValueError, TypeError) as _e:
             return wgp_params
 
     def _log_final_params(self, filtered_params: dict) -> None:

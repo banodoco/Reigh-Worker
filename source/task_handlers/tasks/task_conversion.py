@@ -1,4 +1,5 @@
 from source.core.log import headless_logger
+from source.core.params.phase_config_parser import parse_phase_config
 
 
 # Target megapixel count for auto-scaling img2img input images
@@ -9,6 +10,17 @@ DEFAULT_IMAGE_RESOLUTION = "1024x1024"
 from source.models.model_handlers.qwen_handler import QwenHandler
 from source.utils import extract_orchestrator_parameters
 from headless_model_management import GenerationTask
+
+def _download_to_temp(url: str, suffix: str = ".png", timeout: int = 30) -> str:
+    """Download a URL to a temporary file and return the local path."""
+    import tempfile
+    import requests
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(response.content)
+        return tmp.name
+
 
 def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: str, wan2gp_path: str, debug_mode: bool = False) -> GenerationTask:
     """
@@ -73,6 +85,10 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
         "uni3c_zero_empty_frames", "uni3c_blackout_last_frame",
         # Image-to-image parameters
         "denoising_strength",
+        # Multi-frame guide images
+        "guide_images",
+        # Unified controlled params
+        "ic_loras", "image_guides",
     }
     
     for param in param_whitelist:
@@ -243,6 +259,159 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
 
         # Override model to use Z-Image img2img
         model = "z_image_img2img"
+
+    elif task_type in ("ltx2_multiframe", "ltx2_ic_multiframe"):
+        # Download guide images from URLs to local paths
+        guide_images_raw = db_task_params.get("guide_images", [])
+        if guide_images_raw:
+            import tempfile
+            import requests
+            resolved_guides = []
+            for i, entry in enumerate(guide_images_raw):
+                img_source = entry.get("image") or entry.get("image_url")
+                if img_source and img_source.startswith(("http://", "https://")):
+                    response = requests.get(img_source, timeout=30)
+                    response.raise_for_status()
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp.write(response.content)
+                        local_path = tmp.name
+                else:
+                    local_path = img_source
+                resolved_guides.append({
+                    "image": local_path,
+                    "frame_idx": entry.get("frame_idx", 0),
+                    "strength": entry.get("strength", 1.0),
+                })
+            generation_params["guide_images"] = resolved_guides
+            headless_logger.info(
+                f"[{task_type.upper()}] Resolved {len(resolved_guides)} guide images",
+                task_id=task_id
+            )
+
+    elif task_type == "ltx2_controlled":
+        # Unified LTX2 controlled task type: any combination of IC-LoRAs, standard LoRAs, and image guides
+
+        # 2a. Parse and validate ic_loras
+        ic_loras = db_task_params.get("ic_loras", [])
+        if ic_loras:
+            VALID_IC_TYPES = {"pose": "P", "depth": "D", "canny": "E"}
+            vpt_flags = []
+            for entry in ic_loras:
+                ic_type = entry.get("type", "").lower()
+                if ic_type not in VALID_IC_TYPES:
+                    raise ValueError(f"Invalid IC-LoRA type '{ic_type}'. Must be one of: {list(VALID_IC_TYPES.keys())}")
+                vpt_flags.append(VALID_IC_TYPES[ic_type])
+
+            # Build video_prompt_type: IC flags + V (video conditioning) + G (guide mode)
+            generation_params["video_prompt_type"] = "".join(vpt_flags) + "VG"
+
+            # Weight from first IC-LoRA (primary control weight)
+            generation_params["control_net_weight"] = ic_loras[0].get("weight", 1.0)
+            if len(ic_loras) > 1:
+                generation_params["control_net_weight2"] = ic_loras[1].get("weight", 1.0)
+
+            # Download guide_video from the IC-LoRA entry
+            guide_video_source = ic_loras[0].get("guide_video")
+            if guide_video_source:
+                if guide_video_source.startswith(("http://", "https://")):
+                    local_path = _download_to_temp(guide_video_source, suffix=".mp4")
+                    generation_params["video_guide"] = local_path
+                else:
+                    generation_params["video_guide"] = guide_video_source
+            else:
+                headless_logger.warning(
+                    f"[LTX2_CONTROLLED] IC-LoRA entry has no guide_video",
+                    task_id=task_id
+                )
+
+            headless_logger.info(
+                f"[LTX2_CONTROLLED] IC-LoRAs: types={[e.get('type') for e in ic_loras]}, "
+                f"vpt={generation_params['video_prompt_type']}",
+                task_id=task_id
+            )
+
+        # 2b. Parse and validate loras (standard LoRAs)
+        loras_list = db_task_params.get("loras", [])
+        if loras_list:
+            activated = []
+            multipliers = []
+            for lora_entry in loras_list:
+                path = lora_entry.get("path", "")
+                weight = lora_entry.get("weight", 1.0)
+                if path:
+                    activated.append(path)
+                    multipliers.append(str(weight))
+            if activated:
+                existing = generation_params.get("activated_loras", [])
+                existing_mults = generation_params.get("loras_multipliers", "").split()
+                generation_params["activated_loras"] = existing + activated
+                generation_params["loras_multipliers"] = " ".join(existing_mults + multipliers)
+                headless_logger.info(
+                    f"[LTX2_CONTROLLED] Standard LoRAs: {len(activated)} loaded",
+                    task_id=task_id
+                )
+
+        # 2c. Parse and validate image_guides
+        image_guides = db_task_params.get("image_guides", [])
+        video_length = db_task_params.get("video_length", 121)
+
+        if image_guides:
+            resolved_guides = []
+            for guide_entry in image_guides:
+                img_source = guide_entry.get("image") or guide_entry.get("image_url")
+                anchors = guide_entry.get("anchors", [])
+
+                if not img_source:
+                    raise ValueError("Each image_guide must have an 'image' field")
+                if not anchors:
+                    raise ValueError("Each image_guide must have at least one anchor")
+
+                # Download image if URL
+                if img_source.startswith(("http://", "https://")):
+                    local_path = _download_to_temp(img_source, suffix=".png")
+                else:
+                    local_path = img_source
+
+                # Expand anchors: one image can map to multiple frame positions
+                for anchor in anchors:
+                    frame = anchor.get("frame", 0)
+                    weight = anchor.get("weight", 1.0)
+
+                    if frame != -1 and (frame < 0 or frame >= video_length):
+                        raise ValueError(
+                            f"Anchor frame {frame} out of range [0, {video_length - 1}]. "
+                            f"Use -1 for the last frame."
+                        )
+
+                    resolved_guides.append({
+                        "image": local_path,
+                        "frame_idx": frame,
+                        "strength": weight,
+                    })
+
+            generation_params["guide_images"] = resolved_guides
+            headless_logger.info(
+                f"[LTX2_CONTROLLED] Resolved {len(resolved_guides)} guide image anchors "
+                f"from {len(image_guides)} source images",
+                task_id=task_id
+            )
+
+        # 2d. Store applied controls metadata
+        applied_controls = {}
+        if ic_loras:
+            applied_controls["ic_loras"] = [
+                {"type": e.get("type"), "weight": e.get("weight", 1.0)} for e in ic_loras
+            ]
+        if loras_list:
+            applied_controls["loras"] = [
+                {"path": e.get("path"), "weight": e.get("weight", 1.0)} for e in loras_list
+            ]
+        if image_guides:
+            applied_controls["image_guides"] = [
+                {"anchors": e.get("anchors", []), "image": e.get("image")} for e in image_guides
+            ]
+        if applied_controls:
+            generation_params["_applied_controls_metadata"] = applied_controls
 
     # Defaults
     essential_defaults = {

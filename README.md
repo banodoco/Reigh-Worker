@@ -66,6 +66,21 @@ python -m debug task <task_id>          # Investigate a task
 python -m debug tasks --status Failed   # List recent failures
 ```
 
+## Tests
+
+See [tests/README.md](tests/README.md) for full test documentation.
+
+```bash
+# Headless (no GPU, seconds)
+python -m pytest tests/test_ltx2_pose_smoke.py tests/test_ltx2_headless.py tests/test_task_conversion_headless.py -v
+
+# GPU (requires model weights + vid1.mp4/img1.png in Wan2GP/)
+python -m pytest tests/test_ic_lora_gpu.py -v -s
+
+# All
+python -m pytest tests/test_ltx2_pose_smoke.py tests/test_ltx2_headless.py tests/test_task_conversion_headless.py tests/test_ic_lora_gpu.py -v -s
+```
+
 ## Code Health
 
 <img src="scorecard.png" width="800">

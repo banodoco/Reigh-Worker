@@ -105,6 +105,27 @@ class TravelSegmentProcessor:
         travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: is_vace_model = {self.is_vace_model}", task_id=ctx.task_id)
         travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: mask_video_path exists = {mask_video_path is not None}", task_id=ctx.task_id)
 
+        # LTX-2 uses TSEV-style prompt types
+        if self._is_ltx2_model():
+            has_start = bool(ctx.segment_params.get("image_start") or ctx.orchestrator_details.get("input_image_paths_resolved"))
+            has_end = bool(ctx.segment_params.get("image_end"))
+            has_video_guide = mask_video_path is not None
+
+            vpt = "T"
+            if has_start:
+                vpt += "S"
+            if has_end:
+                vpt += "E"
+            if has_video_guide:
+                vpt += "V"
+
+            travel_logger.debug(
+                f"[VPT_DEBUG] Seg {ctx.segment_idx}: LTX-2 TSEV prompt type = '{vpt}' "
+                f"(start={has_start}, end={has_end}, guide={has_video_guide})",
+                task_id=ctx.task_id,
+            )
+            return vpt
+
         if self.is_vace_model:
             travel_logger.debug(f"[VPT_DEBUG] Seg {ctx.segment_idx}: ENTERING VACE MODEL PATH", task_id=ctx.task_id)
             vpt_components = []

@@ -72,6 +72,7 @@ def configure_model_specific_params(
     video_prompt_type: Optional[str],
     control_net_weight: Optional[float],
     control_net_weight2: Optional[float],
+    min_frames: int = 5,
 ) -> Dict[str, Any]:
     """Compute model-specific generation parameters.
 
