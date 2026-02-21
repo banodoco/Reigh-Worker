@@ -1,3 +1,5 @@
+import os
+
 from source.core.log import headless_logger
 from source.core.params.phase_config_parser import parse_phase_config
 
@@ -176,7 +178,6 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
         local_image_path = None
         try:
             import requests
-            import os
             headless_logger.debug(f"Downloading image for img2img: {image_url}", task_id=task_id)
             response = requests.get(image_url, timeout=30)
             response.raise_for_status()
@@ -231,7 +232,6 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
         except (OSError, ValueError, RuntimeError) as e:
             # If download fails, clean up and raise error
             if local_image_path:
-                import os
                 try:
                     os.unlink(local_image_path)
                 except OSError as e_cleanup:
@@ -302,8 +302,9 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
                     raise ValueError(f"Invalid IC-LoRA type '{ic_type}'. Must be one of: {list(VALID_IC_TYPES.keys())}")
                 vpt_flags.append(VALID_IC_TYPES[ic_type])
 
-            # Build video_prompt_type: IC flags + V (video conditioning) + G (guide mode)
-            generation_params["video_prompt_type"] = "".join(vpt_flags) + "VG"
+            # Build video_prompt_type: IC flags + V (video conditioning)
+            # "G" (guide mode) is added later only if image_guides are present
+            generation_params["video_prompt_type"] = "".join(vpt_flags) + "V"
 
             # Weight from first IC-LoRA (primary control weight)
             generation_params["control_net_weight"] = ic_loras[0].get("weight", 1.0)
@@ -317,6 +318,8 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
                     local_path = _download_to_temp(guide_video_source, suffix=".mp4")
                     generation_params["video_guide"] = local_path
                 else:
+                    if not os.path.exists(guide_video_source):
+                        raise ValueError(f"guide_video local path does not exist: {guide_video_source}")
                     generation_params["video_guide"] = guide_video_source
             else:
                 headless_logger.warning(
@@ -370,6 +373,8 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
                 if img_source.startswith(("http://", "https://")):
                     local_path = _download_to_temp(img_source, suffix=".png")
                 else:
+                    if not os.path.exists(img_source):
+                        raise ValueError(f"image_guides local path does not exist: {img_source}")
                     local_path = img_source
 
                 # Expand anchors: one image can map to multiple frame positions
@@ -390,6 +395,11 @@ def db_task_to_generation_task(db_task_params: dict, task_id: str, task_type: st
                     })
 
             generation_params["guide_images"] = resolved_guides
+
+            # Add "G" flag to video_prompt_type if IC-LoRAs set it
+            if "video_prompt_type" in generation_params:
+                generation_params["video_prompt_type"] += "G"
+
             headless_logger.info(
                 f"[LTX2_CONTROLLED] Resolved {len(resolved_guides)} guide image anchors "
                 f"from {len(image_guides)} source images",
