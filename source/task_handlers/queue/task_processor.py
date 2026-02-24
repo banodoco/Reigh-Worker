@@ -62,25 +62,35 @@ def process_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker
         queue.current_task = task
         task.status = "processing"
 
-    queue.logger.info(f"{worker_name} processing task {task.id}")
+    queue.logger.info(f"[TASK_PROCESSING] {worker_name} processing task {task.id} (model: {task.model})")
     start_time = time.time()
 
     try:
         # 1. Ensure correct model is loaded (orchestrator checks WGP's ground truth)
+        queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 1 - Switching to model {task.model}")
+        switch_start = time.time()
         queue._switch_model(task.model, worker_name)
+        switch_elapsed = time.time() - switch_start
+        queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 1 complete - Model switch took {switch_elapsed:.2f}s")
 
         # 2. Reset billing start time now that model is loaded
         # This ensures users aren't charged for model loading time
+        queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 2 - Resetting billing")
         try:
             from source.db_operations import reset_generation_started_at
             reset_generation_started_at(task.id)
+            queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 2 complete - Billing reset succeeded")
         except (OSError, ValueError, RuntimeError) as e_billing:
             # Don't fail the task if billing reset fails - just log it
             queue.logger.warning(f"[BILLING] Failed to reset generation_started_at for task {task.id}: {e_billing}")
 
         # 3. Delegate actual generation to orchestrator
         # The orchestrator handles the heavy lifting while we manage the queue
+        queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 3 - Starting generation")
+        gen_start = time.time()
         result_path = queue._execute_generation(task, worker_name)
+        gen_elapsed = time.time() - gen_start
+        queue.logger.debug(f"[TASK_PROCESSING] Task {task.id}: Phase 3 complete - Generation took {gen_elapsed:.2f}s, result: {result_path}")
 
         # Verify we're still in Wan2GP directory after generation
         current_dir = os.getcwd()
@@ -186,7 +196,8 @@ def process_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker
             task.processing_time = processing_time
             queue.stats["tasks_failed"] += 1
 
-        queue.logger.error(f"Task {task.id} failed after {processing_time:.1f}s: {e}")
+        queue.logger.error(f"[TASK_ERROR] Task {task.id} failed after {processing_time:.1f}s: {type(e).__name__}: {e}")
+        queue.logger.error(f"[TASK_ERROR] Full traceback:\n{traceback.format_exc()}")
 
         # Check if this is a fatal error that requires worker termination
         try:
@@ -203,7 +214,20 @@ def process_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", worker
             raise
         except (RuntimeError, ValueError, OSError, ImportError) as fatal_check_error:
             # If fatal error checking itself fails, log but don't crash
-            queue.logger.error(f"Error checking for fatal errors: {fatal_check_error}")
+            queue.logger.error(f"[TASK_ERROR] Error checking for fatal errors: {fatal_check_error}")
+    except BaseException as e:
+        # Catch any unexpected exceptions to prevent task from silently dying
+        processing_time = time.time() - start_time
+        error_message_str = str(e)
+
+        with queue.queue_lock:
+            task.status = "failed"
+            task.error_message = error_message_str
+            task.processing_time = processing_time
+            queue.stats["tasks_failed"] += 1
+
+        queue.logger.critical(f"[TASK_ERROR] Task {task.id} hit UNEXPECTED exception after {processing_time:.1f}s: {type(e).__name__}: {e}")
+        queue.logger.critical(f"[TASK_ERROR] Full traceback:\n{traceback.format_exc()}")
 
     finally:
         with queue.queue_lock:
@@ -244,8 +268,18 @@ def execute_generation_impl(queue: "HeadlessTaskQueue", task: "GenerationTask", 
 
     # CRITICAL: Apply phase_config patches NOW in the worker thread where wgp is imported
     # Acquire lock to prevent concurrent tasks from corrupting shared wgp globals
+    queue.logger.info(f"[LOCK_ACQUIRE] Task {task.id} attempting to acquire _wgp_patch_lock...")
+    lock_acquire_start = time.time()
     with _wgp_patch_lock:
-        return _execute_generation_with_patches(queue, task, worker_name, generation_params)
+        lock_acquired_elapsed = time.time() - lock_acquire_start
+        if lock_acquired_elapsed > 0.1:
+            queue.logger.warning(f"[LOCK_ACQUIRE] Task {task.id} waited {lock_acquired_elapsed:.3f}s for _wgp_patch_lock (possible contention)")
+        else:
+            queue.logger.debug(f"[LOCK_ACQUIRE] Task {task.id} acquired _wgp_patch_lock in {lock_acquired_elapsed:.3f}s")
+        try:
+            return _execute_generation_with_patches(queue, task, worker_name, generation_params)
+        finally:
+            queue.logger.debug(f"[LOCK_RELEASE] Task {task.id} releasing _wgp_patch_lock")
 
 
 def _execute_generation_with_patches(
@@ -354,49 +388,87 @@ def _execute_generation_with_patches(
             queue_logger.debug(f"[GENERATION_DEBUG]   {key}: {value}", task_id=task.id)
 
     # Determine generation type and delegate - wrap in try/finally for patch restoration
+    import signal
+    generation_start_time = time.time()
+    GENERATION_TIMEOUT_SECONDS = 1200  # 20 minutes - longer than task timeout but prevents indefinite hangs
+
+    def timeout_handler(signum, frame):
+        """Handler for SIGALRM when generation takes too long"""
+        elapsed = time.time() - generation_start_time
+        queue.logger.error(
+            f"[GENERATION_TIMEOUT] Task {task.id} exceeded {GENERATION_TIMEOUT_SECONDS}s timeout after {elapsed:.1f}s. "
+            f"Generation is likely stuck in WGP/CUDA. This usually indicates a GPU synchronization deadlock.",
+            task_id=task.id
+        )
+        raise RuntimeError(f"Generation timeout after {elapsed:.1f}s")
+
     try:
+        # Set timeout alarm (will raise SIGALRM)
+        try:
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(GENERATION_TIMEOUT_SECONDS)
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Set {GENERATION_TIMEOUT_SECONDS}s timeout alarm")
+        except (ValueError, OSError) as e:
+            # Signal not available on all platforms (e.g., Windows), silently continue
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Timeout not available on this platform: {e}")
+
         # Check if model supports VACE features
+        queue.logger.debug(f"[GENERATION] Task {task.id}: Checking if model supports VACE...")
         model_supports_vace = queue._model_supports_vace(task.model)
+        queue.logger.debug(f"[GENERATION] Task {task.id}: model_supports_vace={model_supports_vace}")
 
         if model_supports_vace:
-            queue_logger.debug(f"[GENERATION_DEBUG] Task {task.id}: Using VACE generation path", task_id=task.id)
+            queue.logger.info(f"[GENERATION] Task {task.id}: Using VACE generation path for model {task.model}")
 
             # CRITICAL: VACE models require a video_guide parameter
             if "video_guide" in generation_params and generation_params["video_guide"]:
-                queue_logger.debug(f"[GENERATION_DEBUG] Task {task.id}: Video guide provided: {generation_params['video_guide']}", task_id=task.id)
+                queue.logger.debug(f"[GENERATION] Task {task.id}: Video guide provided: {generation_params['video_guide']}")
             else:
                 error_msg = f"VACE model '{task.model}' requires a video_guide parameter but none was provided. VACE models cannot perform pure text-to-video generation."
-                queue.logger.error(f"[GENERATION_DEBUG] Task {task.id}: {error_msg}")
+                queue.logger.error(f"[GENERATION] Task {task.id}: {error_msg}")
                 raise ValueError(error_msg)
 
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Calling orchestrator.generate_vace()")
+            gen_call_start = time.time()
             result = queue.orchestrator.generate_vace(
                 prompt=task.prompt,
                 model_type=task.model,  # Pass model type for parameter resolution
                 **generation_params
             )
+            gen_call_elapsed = time.time() - gen_call_start
+            queue.logger.debug(f"[GENERATION] Task {task.id}: generate_vace() returned after {gen_call_elapsed:.2f}s: {result}")
         elif queue.orchestrator._is_flux():
-            queue_logger.debug(f"[GENERATION_DEBUG] Task {task.id}: Using Flux generation path", task_id=task.id)
+            queue.logger.info(f"[GENERATION] Task {task.id}: Using Flux generation path for model {task.model}")
 
             # For Flux, map video_length to num_images
             if "video_length" in generation_params:
                 generation_params["num_images"] = generation_params.pop("video_length")
+                queue.logger.debug(f"[GENERATION] Task {task.id}: Mapped video_length to num_images")
 
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Calling orchestrator.generate_flux()")
+            gen_call_start = time.time()
             result = queue.orchestrator.generate_flux(
                 prompt=task.prompt,
                 model_type=task.model,  # Pass model type for parameter resolution
                 **generation_params
             )
+            gen_call_elapsed = time.time() - gen_call_start
+            queue.logger.debug(f"[GENERATION] Task {task.id}: generate_flux() returned after {gen_call_elapsed:.2f}s: {result}")
         else:
-            queue_logger.debug(f"[GENERATION_DEBUG] Task {task.id}: Using T2V generation path", task_id=task.id)
+            queue.logger.info(f"[GENERATION] Task {task.id}: Using T2V generation path for model {task.model}")
 
             # T2V or other models - pass model_type for proper parameter resolution
             # Note: WGP stdout is captured to svi_debug.txt file instead of logger
             # to avoid recursion issues
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Calling orchestrator.generate_t2v()")
+            gen_call_start = time.time()
             result = queue.orchestrator.generate_t2v(
                 prompt=task.prompt,
                 model_type=task.model,  # CRITICAL: Pass model type for parameter resolution
                 **generation_params
             )
+            gen_call_elapsed = time.time() - gen_call_start
+            queue.logger.debug(f"[GENERATION] Task {task.id}: generate_t2v() returned after {gen_call_elapsed:.2f}s: {result}")
 
         queue.logger.info(f"{worker_name} generation completed for task {task.id}: {result}")
 
@@ -409,27 +481,39 @@ def _execute_generation_with_patches(
                 queue.logger.info(f"{worker_name} converted single frame video to PNG: {png_result}")
                 return png_result
 
+        queue.logger.debug(f"[GENERATION] Task {task.id}: Total generation execution completed successfully")
         return result
 
     except (RuntimeError, ValueError, OSError) as e:
-        queue.logger.error(f"{worker_name} generation failed for task {task.id}: {e}")
+        queue.logger.error(f"[GENERATION] Task {task.id} generation FAILED: {type(e).__name__}: {e}")
+        queue.logger.error(f"[GENERATION] Traceback:\n{traceback.format_exc()}")
+        raise
+    except BaseException as e:
+        queue.logger.critical(f"[GENERATION] Task {task.id} generation hit UNEXPECTED exception: {type(e).__name__}: {e}")
+        queue.logger.critical(f"[GENERATION] Traceback:\n{traceback.format_exc()}")
         raise
     finally:
+        queue.logger.debug(f"[GENERATION] Task {task.id}: Entering finally block for cleanup")
+
         # CRITICAL: Restore model patches to prevent contamination across tasks
         if _patch_applied and _parsed_phase_config_for_restore and _model_name_for_restore:
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Restoring phase config patches for model '{_model_name_for_restore}'")
             try:
                 from source.core.params.phase_config import restore_model_patches
+                restore_start = time.time()
                 restore_model_patches(
                     _parsed_phase_config_for_restore,
                     _model_name_for_restore,
                     task.id
                 )
-                queue.logger.info(f"[PHASE_CONFIG] Restored original model definition for '{_model_name_for_restore}' after task {task.id}")
+                restore_elapsed = time.time() - restore_start
+                queue.logger.info(f"[PHASE_CONFIG] Restored original model definition for '{_model_name_for_restore}' after task {task.id} (took {restore_elapsed:.3f}s)")
             except (RuntimeError, ImportError, OSError) as restore_error:
                 queue.logger.warning(f"[PHASE_CONFIG] Failed to restore model patches for task {task.id}: {restore_error}")
 
         # Restore svi2pro and sliding_window if we patched them
         if _svi2pro_patched or _wan_model_patched:
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Restoring svi2pro/sliding_window patches")
             try:
                 import wgp
                 model_key = task.model
@@ -458,6 +542,17 @@ def _execute_generation_with_patches(
             except (RuntimeError, ImportError, AttributeError, KeyError) as restore_error:
                 queue.logger.warning(f"[SVI2PRO] Failed to restore svi2pro for task {task.id}: {restore_error}")
 
+        # Cancel the generation timeout alarm (if set and still active)
+        queue.logger.debug(f"[GENERATION] Task {task.id}: Canceling timeout alarm")
+        try:
+            signal.alarm(0)
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Timeout alarm canceled")
+        except (ValueError, NameError) as e:
+            # Signal not available or not set, silently continue
+            queue.logger.debug(f"[GENERATION] Task {task.id}: Could not cancel timeout alarm: {e}")
+
+        queue.logger.debug(f"[GENERATION] Task {task.id}: Finally block cleanup complete")
+
 
 # ---------------------------------------------------------------------------
 # Worker loop
@@ -469,22 +564,40 @@ def worker_loop(queue: "HeadlessTaskQueue"):
     worker_name = threading.current_thread().name
     queue.logger.info(f"{worker_name} started")
 
+    iteration_count = 0
     while queue.running and not queue.shutdown_event.is_set():
+        iteration_count += 1
         try:
+            # Log queue status (every 10 iterations to avoid log spam)
+            if iteration_count % 10 == 0:
+                queue_size = queue.task_queue.qsize()
+                queue.logger.debug(f"[WORKER_LOOP] {worker_name} iteration {iteration_count}: queue_size={queue_size}")
+
             # Get next task (blocks with timeout)
             try:
+                queue.logger.debug(f"[WORKER_LOOP] {worker_name} attempting to get task from queue...")
+                get_start = time.time()
                 priority, timestamp, task = queue.task_queue.get(timeout=1.0)
+                get_elapsed = time.time() - get_start
+                queue.logger.info(f"[WORKER_LOOP] {worker_name} retrieved task {task.id} from queue (queue.get took {get_elapsed:.3f}s)")
             except queue_mod.Empty:
+                queue.logger.debug(f"[WORKER_LOOP] {worker_name} queue empty, continuing...")
                 continue
 
             # Process the task
+            queue.logger.info(f"[WORKER_LOOP] {worker_name} starting process_task_impl for {task.id}")
             process_task_impl(queue, task, worker_name)
+            queue.logger.info(f"[WORKER_LOOP] {worker_name} completed process_task_impl for {task.id}")
 
         except (RuntimeError, ValueError, OSError) as e:
-            queue.logger.error(f"{worker_name} error: {e}\n{traceback.format_exc()}")
+            queue.logger.error(f"[WORKER_LOOP] {worker_name} error in iteration {iteration_count}: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            time.sleep(1.0)
+        except BaseException as e:
+            # Catch any unexpected exceptions to prevent worker from dying silently
+            queue.logger.critical(f"[WORKER_LOOP] {worker_name} UNEXPECTED ERROR in iteration {iteration_count}: {type(e).__name__}: {e}\n{traceback.format_exc()}")
             time.sleep(1.0)
 
-    queue.logger.info(f"{worker_name} stopped")
+    queue.logger.info(f"[WORKER_LOOP] {worker_name} stopped after {iteration_count} iterations")
 
 
 # ---------------------------------------------------------------------------

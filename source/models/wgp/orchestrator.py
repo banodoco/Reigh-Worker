@@ -805,8 +805,12 @@ class WanOrchestrator:
                 self._log_final_params(_filtered_params)
 
                 # Execute WGP with capture (delegated to capture module)
+                # Extract task_id from kwargs for logging context
+                task_id_for_logging = kwargs.get("task_id") or _filtered_params.get("task_id")
                 _, captured_stdout, captured_stderr, captured_logs = run_with_capture(
                     self._generate_video,
+                    task_id=task_id_for_logging,
+                    log_func=generation_logger.debug,
                     **_filtered_params,
                 )
 
