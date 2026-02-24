@@ -32,6 +32,47 @@ class TailBuffer:
         return self._buf
 
 
+class LoggingTailBuffer(TailBuffer):
+    """Ring-buffer that ALSO logs output to the logging system in real-time (only in debug mode)."""
+
+    def __init__(self, max_chars: int, task_id: Optional[str] = None, log_func: Optional[Callable] = None):
+        super().__init__(max_chars)
+        self.task_id = task_id
+        self.log_func = log_func  # Function to call to log (e.g., generation_logger.debug)
+        self._line_buffer = ""  # Buffer lines until newline to avoid log spam
+        self._debug_mode = False
+
+        # Check if debug mode is enabled
+        try:
+            from source.core.log.core import is_debug_enabled
+            self._debug_mode = is_debug_enabled()
+        except (ImportError, AttributeError):
+            pass
+
+    def write(self, text: str):
+        if not text:
+            return
+        try:
+            # Write to memory buffer (always)
+            super().write(text)
+
+            # Stream to logger only if debug mode is enabled (to avoid log spam in production)
+            if self._debug_mode and self.task_id and self.log_func:
+                self._line_buffer += str(text)
+                # Log complete lines to avoid cluttering logs with partial output
+                while '\n' in self._line_buffer:
+                    line, self._line_buffer = self._line_buffer.split('\n', 1)
+                    if line.strip():  # Only log non-empty lines
+                        try:
+                            self.log_func(f"[WGP_STREAM] {line}", task_id=self.task_id)
+                        except (TypeError, OSError, RuntimeError, AttributeError):
+                            # If logging fails, silently continue - don't break generation
+                            pass
+        except (TypeError, ValueError, MemoryError):
+            # Never let logging capture break generation
+            pass
+
+
 class TeeWriter:
     """Tee stdout/stderr: capture while still printing to console.
 
@@ -115,6 +156,8 @@ _CAPTURE_PYLOG_RECORDS = 1000  # keep last N log records (all levels)
 
 def run_with_capture(
     fn: Callable[..., Any],
+    task_id: Optional[str] = None,
+    log_func: Optional[Callable] = None,
     **kwargs,
 ) -> Tuple[Optional[Any], TailBuffer, TailBuffer, Deque[Dict[str, str]]]:
     """Execute *fn* while capturing stdout, stderr, and Python logging.
@@ -129,6 +172,12 @@ def run_with_capture(
     ``captured_stderr``, and ``captured_logs`` attributes on the exception
     object (attached as ``__captured_stdout__`` etc.).
 
+    Args:
+        fn: The function to execute
+        task_id: Optional task ID for logging context
+        log_func: Optional logging function (e.g., generation_logger.debug) to stream output
+        **kwargs: Arguments to pass to fn
+
     Returns:
         (return_value, captured_stdout, captured_stderr, captured_logs)
         *return_value* is whatever *fn* returns.
@@ -136,8 +185,13 @@ def run_with_capture(
     Raises:
         Any exception raised by *fn*, with captured output attached.
     """
-    captured_stdout = TailBuffer(_CAPTURE_STDOUT_CHARS)
-    captured_stderr = TailBuffer(_CAPTURE_STDERR_CHARS)
+    # Use logging-aware buffers if a log function is provided
+    if log_func:
+        captured_stdout = LoggingTailBuffer(_CAPTURE_STDOUT_CHARS, task_id=task_id, log_func=log_func)
+        captured_stderr = LoggingTailBuffer(_CAPTURE_STDERR_CHARS, task_id=task_id, log_func=log_func)
+    else:
+        captured_stdout = TailBuffer(_CAPTURE_STDOUT_CHARS)
+        captured_stderr = TailBuffer(_CAPTURE_STDERR_CHARS)
     captured_logs: Deque[Dict[str, str]] = deque(maxlen=_CAPTURE_PYLOG_RECORDS)
 
     # Set up capture handler on root logger + non-propagating library loggers
