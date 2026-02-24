@@ -182,7 +182,7 @@ def process_task_impl(queue: Any, task: Any, worker_name: str):
         # This clears PyTorch's internal caches and Python garbage to prevent fragmentation
         queue._cleanup_memory_after_task(task.id)
 
-    except (RuntimeError, ValueError, OSError) as e:
+    except (RuntimeError, ValueError, OSError, TypeError, AttributeError) as e:
         # Handle task failure
         processing_time = time.time() - start_time
         error_message_str = str(e)
@@ -213,6 +213,12 @@ def process_task_impl(queue: Any, task: Any, worker_name: str):
                     tb = tb.tb_next
                     frame_num += 1
 
+        try:
+            from source.core.log import flush_log_buffer
+            flush_log_buffer()
+        except (ImportError, AttributeError, OSError):
+            pass  # Don't let flush errors mask the original exception
+
         # Check if this is a fatal error that requires worker termination
         try:
             from source.task_handlers.worker.fatal_error_handler import check_and_handle_fatal_error, FatalWorkerError
@@ -242,6 +248,12 @@ def process_task_impl(queue: Any, task: Any, worker_name: str):
 
         queue.logger.critical(f"[TASK_ERROR] Task {task.id} hit UNEXPECTED exception after {processing_time:.1f}s: {type(e).__name__}: {e}")
         queue.logger.critical(f"[TASK_ERROR] Full traceback:\n{traceback.format_exc()}")
+
+        try:
+            from source.core.log import flush_log_buffer
+            flush_log_buffer()
+        except (ImportError, AttributeError, OSError):
+            pass  # Don't let flush errors mask the original exception
 
     finally:
         with queue.queue_lock:
@@ -498,7 +510,7 @@ def _execute_generation_with_patches(
         queue.logger.debug(f"[GENERATION] Task {task.id}: Total generation execution completed successfully")
         return result
 
-    except (RuntimeError, ValueError, OSError) as e:
+    except (RuntimeError, ValueError, OSError, TypeError, AttributeError) as e:
         queue.logger.error(f"[GENERATION] Task {task.id} generation FAILED: {type(e).__name__}: {e}")
         queue.logger.error(f"[GENERATION] Traceback:\n{traceback.format_exc()}")
         raise

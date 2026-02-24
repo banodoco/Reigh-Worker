@@ -612,6 +612,7 @@ class WanOrchestrator:
             video_prompt_type=video_prompt_type,
             control_net_weight=control_net_weight,
             control_net_weight2=control_net_weight2,
+            model_type=effective_model_type,
         )
         image_mode = model_params["image_mode"]
         actual_video_length = model_params["actual_video_length"]
@@ -778,7 +779,7 @@ class WanOrchestrator:
 
             return output_path
 
-        except (RuntimeError, ValueError, OSError, TypeError) as e:
+        except (RuntimeError, ValueError, OSError, TypeError, AttributeError) as e:
             generation_logger.error(f"Generation failed: {e}")
             try:
                 # If run_with_capture raised, captured output is attached to the exception
@@ -788,6 +789,11 @@ class WanOrchestrator:
                 log_captured_output(exc_stdout, exc_stderr, exc_logs)
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass  # Don't let logging errors mask the original exception
+            try:
+                from source.core.log import flush_log_buffer
+                flush_log_buffer()
+            except (ImportError, AttributeError, OSError):
+                pass  # Don't let flush errors mask the original exception
             raise
 
     # ------------------------------------------------------------------
