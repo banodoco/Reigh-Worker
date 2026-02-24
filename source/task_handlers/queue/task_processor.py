@@ -196,6 +196,23 @@ def process_task_impl(queue: Any, task: Any, worker_name: str):
         queue.logger.error(f"[TASK_ERROR] Task {task.id} failed after {processing_time:.1f}s: {type(e).__name__}: {e}")
         queue.logger.error(f"[TASK_ERROR] Full traceback:\n{traceback.format_exc()}")
 
+        # DEEP DIAGNOSTIC: Log exception details for NoneType errors
+        if isinstance(e, (TypeError, AttributeError)):
+            queue.logger.error(f"[TASK_ERROR_DEEP] Exception is {type(e).__name__} - likely attribute access on None")
+            queue.logger.error(f"[TASK_ERROR_DEEP] Exception module: {type(e).__module__}")
+            queue.logger.error(f"[TASK_ERROR_DEEP] Exception args: {e.args}")
+            if hasattr(e, '__traceback__'):
+                import sys
+                tb = e.__traceback__
+                queue.logger.error(f"[TASK_ERROR_DEEP] Traceback frames:")
+                frame_num = 0
+                while tb is not None:
+                    frame = tb.tb_frame
+                    queue.logger.error(f"  Frame {frame_num}: {frame.f_code.co_filename}:{tb.tb_lineno} in {frame.f_code.co_name}")
+                    queue.logger.error(f"    Local vars: {list(frame.f_locals.keys())}")
+                    tb = tb.tb_next
+                    frame_num += 1
+
         # Check if this is a fatal error that requires worker termination
         try:
             from source.task_handlers.worker.fatal_error_handler import check_and_handle_fatal_error, FatalWorkerError

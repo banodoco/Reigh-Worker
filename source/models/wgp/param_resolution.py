@@ -74,7 +74,28 @@ def resolve_parameters(orchestrator, model_type: str, task_params: dict) -> dict
                 # JSON passthrough mode: Allow activated_loras and loras_multipliers to pass directly
                 if param not in ["prompt"]:
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Getting old value for '{param}'")
-                    old_value = resolved_params.get(param, "NOT_SET")
+
+                    # DEEP DIAGNOSTIC: Log resolved_params state before .get() call
+                    try:
+                        generation_logger.debug(f"[DEEP_DIAG] resolved_params type: {type(resolved_params).__name__}")
+                        generation_logger.debug(f"[DEEP_DIAG] resolved_params is None: {resolved_params is None}")
+                        if resolved_params is not None:
+                            generation_logger.debug(f"[DEEP_DIAG] resolved_params keys count: {len(resolved_params)}")
+                            generation_logger.debug(f"[DEEP_DIAG] param '{param}' in resolved_params: {param in resolved_params}")
+                    except Exception as diag_e:
+                        generation_logger.error(f"[DEEP_DIAG] Failed to log resolved_params state: {diag_e}")
+
+                    try:
+                        old_value = resolved_params.get(param, "NOT_SET")
+                    except Exception as e:
+                        # Catch the exact error and log full context
+                        generation_logger.critical(f"[CRASH_POINT] LOOP [{idx+1}] failed at resolved_params.get('{param}')")
+                        generation_logger.critical(f"[CRASH_POINT] Error type: {type(e).__name__}: {e}")
+                        generation_logger.critical(f"[CRASH_POINT] resolved_params is: {resolved_params}")
+                        generation_logger.critical(f"[CRASH_POINT] resolved_params type: {type(resolved_params)}")
+                        import traceback
+                        generation_logger.critical(f"[CRASH_POINT] Full traceback:\n{traceback.format_exc()}")
+                        raise
 
                     # DEFENSIVE: Skip None values from model defaults (they shouldn't override)
                     if value is None:
@@ -86,7 +107,18 @@ def resolve_parameters(orchestrator, model_type: str, task_params: dict) -> dict
 
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Logging change for '{param}'")
                     # Safe logging: Use safe_log_change to prevent hanging on large values
-                    generation_logger.debug(safe_log_change(param, old_value, value))
+                    try:
+                        change_log = safe_log_change(param, old_value, value)
+                        generation_logger.debug(change_log)
+                    except Exception as log_e:
+                        # Catch logging errors and log them separately
+                        generation_logger.critical(f"[CRASH_POINT] LOOP [{idx+1}] failed at safe_log_change('{param}')")
+                        generation_logger.critical(f"[CRASH_POINT] Error type: {type(log_e).__name__}: {log_e}")
+                        generation_logger.critical(f"[CRASH_POINT] old_value: {old_value}, type: {type(old_value)}")
+                        generation_logger.critical(f"[CRASH_POINT] value: {value}, type: {type(value)}")
+                        import traceback
+                        generation_logger.critical(f"[CRASH_POINT] Full traceback:\n{traceback.format_exc()}")
+                        raise
 
                     generation_logger.debug(f"✅ LOOP [{idx+1}]: Completed '{param}'")
                 else:
