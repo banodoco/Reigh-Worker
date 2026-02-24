@@ -76,6 +76,11 @@ def resolve_parameters(orchestrator, model_type: str, task_params: dict) -> dict
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Getting old value for '{param}'")
                     old_value = resolved_params.get(param, "NOT_SET")
 
+                    # DEFENSIVE: Skip None values from model defaults (they shouldn't override)
+                    if value is None:
+                        generation_logger.debug(f"⏭️  LOOP [{idx+1}]: Skipped '{param}' - model default is None (invalid)")
+                        continue
+
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Assigning new value for '{param}'")
                     resolved_params[param] = value
 
