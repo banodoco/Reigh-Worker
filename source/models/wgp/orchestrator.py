@@ -873,8 +873,8 @@ class WanOrchestrator:
             if key == 'state':
                 state_summary = {
                     'model_type': value.get('model_type'),
-                    'gen_file_count': len(value.get('gen', {}).get('file_list', [])),
-                    'loras_count': len(value.get('loras', []))
+                    'gen_file_count': len((value.get('gen') or {}).get('file_list', [])),
+                    'loras_count': len(value.get('loras') or [])
                 }
                 generation_logger.info(f"[FINAL_PARAMS] {key}: {state_summary} (truncated)")
             elif key in ('guidance_scale', 'guidance2_scale', 'guidance3_scale', 'num_inference_steps', 'switch_threshold', 'switch_threshold2'):
