@@ -548,7 +548,22 @@ class WanOrchestrator:
             resolved_params = task_explicit_params.copy()
             generation_logger.info(f"[PASSTHROUGH] Using task parameters directly without resolution: {len(resolved_params)} params")
         else:
-            resolved_params = self._resolve_parameters(effective_model_type, task_explicit_params)
+            generation_logger.info(f"[PARAM_RESOLUTION] Starting parameter resolution for model '{effective_model_type}'")
+            try:
+                resolved_params = self._resolve_parameters(effective_model_type, task_explicit_params)
+                generation_logger.info(f"[PARAM_RESOLUTION] RETURNED successfully: type={type(resolved_params).__name__}, len={len(resolved_params) if isinstance(resolved_params, dict) else 'N/A'}")
+            except Exception as e:
+                generation_logger.critical(f"[PARAM_RESOLUTION] FAILED with {type(e).__name__}: {e}")
+                import traceback
+                generation_logger.critical(f"[PARAM_RESOLUTION] Traceback:\n{traceback.format_exc()}")
+                raise
+
+            # AGGRESSIVE: Dump all guidance-related params
+            generation_logger.info(f"[AGGRESSIVE] Resolved parameters for guidance:")
+            guidance_params = {k: v for k, v in resolved_params.items() if 'guidance' in k or 'phase' in k or 'switch' in k}
+            for k, v in guidance_params.items():
+                generation_logger.info(f"  {k}: {type(v).__name__} = {repr(v)[:100]}")
+
             generation_logger.info(f"[PARAM_RESOLUTION] Final parameters for '{effective_model_type}': num_inference_steps={resolved_params.get('num_inference_steps')}, guidance_scale={resolved_params.get('guidance_scale')}")
 
         # Determine model types for generation
