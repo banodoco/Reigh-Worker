@@ -60,6 +60,13 @@ def resolve_parameters(orchestrator, model_type: str, task_params: dict) -> dict
             generation_logger.info(f"🔍 DIAGNOSTIC: model_defaults is type: {type(model_defaults)}")
             generation_logger.info(f"🔍 DIAGNOSTIC: model_defaults id: {id(model_defaults)}")
 
+            # AGGRESSIVE: Dump full model_defaults values
+            generation_logger.info(f"🔍 AGGRESSIVE_DUMP: model_defaults full contents:")
+            for key in list(model_defaults.keys())[:10]:  # First 10 for safety
+                val = model_defaults.get(key)
+                generation_logger.info(f"  {key}: {type(val).__name__} = {repr(val)[:200]}")
+            generation_logger.info(f"  ... and {max(0, len(model_defaults) - 10)} more")
+
             # Safe logging: Only show keys before applying model config
             generation_logger.debug(f"Before applying model config - resolved_params keys: {list(resolved_params.keys())}")
 
@@ -74,14 +81,70 @@ def resolve_parameters(orchestrator, model_type: str, task_params: dict) -> dict
                 # JSON passthrough mode: Allow activated_loras and loras_multipliers to pass directly
                 if param not in ["prompt"]:
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Getting old value for '{param}'")
-                    old_value = resolved_params.get(param, "NOT_SET")
+
+                    # DEEP DIAGNOSTIC: Log resolved_params state before .get() call
+                    try:
+                        generation_logger.debug(f"[DEEP_DIAG] resolved_params type: {type(resolved_params).__name__}")
+                        generation_logger.debug(f"[DEEP_DIAG] resolved_params is None: {resolved_params is None}")
+                        if resolved_params is not None:
+                            generation_logger.debug(f"[DEEP_DIAG] resolved_params keys count: {len(resolved_params)}")
+                            generation_logger.debug(f"[DEEP_DIAG] param '{param}' in resolved_params: {param in resolved_params}")
+                    except Exception as diag_e:
+                        generation_logger.error(f"[DEEP_DIAG] Failed to log resolved_params state: {diag_e}")
+
+                    # AGGRESSIVE: Dump current resolved_params dict around critical parameters
+                    if param in ['guidance_phases', 'guidance_scale', 'guidance2_scale', 'guidance3_scale']:
+                        generation_logger.info(f"[AGGRESSIVE] LOOP [{idx+1}] PRE-PROCESSING resolved_params snapshot:")
+                        generation_logger.info(f"  Type: {type(resolved_params).__name__}")
+                        if isinstance(resolved_params, dict):
+                            guidance_keys = [k for k in resolved_params.keys() if 'guidance' in k or 'switch' in k or 'phase' in k]
+                            for k in guidance_keys:
+                                v = resolved_params.get(k)
+                                generation_logger.info(f"  {k}: {type(v).__name__} = {repr(v)[:100]}")
+                        else:
+                            generation_logger.info(f"  WARNING: resolved_params is {type(resolved_params)}, not dict!")
+
+                    try:
+                        old_value = resolved_params.get(param, "NOT_SET")
+                    except Exception as e:
+                        # Catch the exact error and log full context
+                        generation_logger.critical(f"[CRASH_POINT] LOOP [{idx+1}] failed at resolved_params.get('{param}')")
+                        generation_logger.critical(f"[CRASH_POINT] Error type: {type(e).__name__}: {e}")
+                        generation_logger.critical(f"[CRASH_POINT] resolved_params is: {resolved_params}")
+                        generation_logger.critical(f"[CRASH_POINT] resolved_params type: {type(resolved_params)}")
+                        import traceback
+                        generation_logger.critical(f"[CRASH_POINT] Full traceback:\n{traceback.format_exc()}")
+                        raise
+
+                    # DEFENSIVE: Skip None values from model defaults (they shouldn't override)
+                    if value is None:
+                        generation_logger.debug(f"⏭️  LOOP [{idx+1}]: Skipped '{param}' - model default is None (invalid)")
+                        continue
 
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Assigning new value for '{param}'")
                     resolved_params[param] = value
 
+                    # AGGRESSIVE: Log after assignment
+                    if param in ['guidance_phases', 'guidance_scale', 'guidance2_scale', 'guidance3_scale']:
+                        generation_logger.info(f"[AGGRESSIVE] LOOP [{idx+1}] POST-ASSIGNMENT:")
+                        generation_logger.info(f"  resolved_params['{param}'] = {repr(resolved_params.get(param))[:100]}")
+                        generation_logger.info(f"  old_value was: {repr(old_value)[:100]}")
+                        generation_logger.info(f"  value param was: {repr(value)[:100]}")
+
                     generation_logger.debug(f"🔍 LOOP [{idx+1}]: Logging change for '{param}'")
                     # Safe logging: Use safe_log_change to prevent hanging on large values
-                    generation_logger.debug(safe_log_change(param, old_value, value))
+                    try:
+                        change_log = safe_log_change(param, old_value, value)
+                        generation_logger.debug(change_log)
+                    except Exception as log_e:
+                        # Catch logging errors and log them separately
+                        generation_logger.critical(f"[CRASH_POINT] LOOP [{idx+1}] failed at safe_log_change('{param}')")
+                        generation_logger.critical(f"[CRASH_POINT] Error type: {type(log_e).__name__}: {log_e}")
+                        generation_logger.critical(f"[CRASH_POINT] old_value: {old_value}, type: {type(old_value)}")
+                        generation_logger.critical(f"[CRASH_POINT] value: {value}, type: {type(value)}")
+                        import traceback
+                        generation_logger.critical(f"[CRASH_POINT] Full traceback:\n{traceback.format_exc()}")
+                        raise
 
                     generation_logger.debug(f"✅ LOOP [{idx+1}]: Completed '{param}'")
                 else:

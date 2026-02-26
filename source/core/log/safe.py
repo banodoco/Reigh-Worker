@@ -91,6 +91,10 @@ def safe_repr(obj: Any, max_length: int = None) -> str:
         max_length = LOG_MAX_OBJECT_OUTPUT
 
     try:
+        # Handle None explicitly (safe_repr should never be called on None but be defensive)
+        if obj is None:
+            return "None"
+
         # Use reprlib for smart truncation
         result = _safe_repr.repr(obj)
 
@@ -104,7 +108,7 @@ def safe_repr(obj: Any, max_length: int = None) -> str:
             result = result[:max_length] + "...}"
 
         return result
-    except (ValueError, KeyError, TypeError, RuntimeError) as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         return f"<repr failed: {type(obj).__name__} - {e}>"
 
 
@@ -261,22 +265,27 @@ def safe_log_change(param: str, old_value: Any, new_value: Any, max_length: int 
         max_length = LOG_MAX_STRING_REPR
 
     try:
-        # Special handling for dicts
-        if isinstance(old_value, dict):
+        # Special handling for None values (must come before other checks)
+        if old_value is None:
+            old_str = "None"
+        elif isinstance(old_value, dict):
             old_str = f"<dict with {len(old_value)} keys>"
         elif old_value == "NOT_SET":
             old_str = "NOT_SET"
         else:
             old_str = safe_repr(old_value, max_length)
 
-        if isinstance(new_value, dict):
+        # Special handling for None values (must come before other checks)
+        if new_value is None:
+            new_str = "None"
+        elif isinstance(new_value, dict):
             new_str = f"<dict with {len(new_value)} keys>"
         else:
             new_str = safe_repr(new_value, max_length)
 
         return f"{param}: {old_str} \u2192 {new_str}"
-    except (ValueError, KeyError, TypeError) as e:
-        return f"{param}: <comparison failed: {e}>"
+    except (ValueError, KeyError, TypeError, AttributeError, RuntimeError) as e:
+        return f"{param}: <comparison failed: {type(e).__name__}: {e}>"
 
 
 # Update ComponentLogger to use safe logging by default
