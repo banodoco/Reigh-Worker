@@ -34,6 +34,7 @@ __all__ = [
     "task_logger",
     "set_log_interceptor",
     "set_current_task_context",
+    "flush_log_buffer",
 ]
 
 # Global debug mode flag - set by the main application
@@ -212,6 +213,16 @@ def set_log_interceptor(interceptor: Optional[CustomLogInterceptor]):
     _log_interceptor = interceptor
 
 
+def flush_log_buffer():
+    """Flush buffered logs to ensure they reach the database.
+
+    Call this in exception handlers before re-raising, so crash
+    diagnostics aren't lost in the buffer.
+    """
+    if _log_interceptor:
+        _log_interceptor.log_buffer.flush()
+
+
 def set_current_task_context(task_id: Optional[str]):
     """
     Set/clear the task context used for associating intercepted logs with a task_id.
@@ -264,9 +275,30 @@ def error(component: str, message: str, task_id: Optional[str] = None, exc_info:
     _intercept_log("ERROR", f"{component}: {message}", task_id)
 
 
+_original_critical = critical
+def critical(component: str, message: str, task_id: Optional[str] = None, exc_info: bool = False):
+    """Log a critical/fatal error message that should always be shown."""
+    _original_critical(component, message, task_id, exc_info=exc_info)
+    _intercept_log("ERROR", f"{component}: {message}", task_id)
+
+
 _original_debug = debug
 def debug(component: str, message: str, task_id: Optional[str] = None, exc_info: bool = False):
     """Log a debug message that only appears when debug mode is enabled."""
     _original_debug(component, message, task_id, exc_info=exc_info)
     if _debug_mode:  # Only intercept if debug mode is enabled
         _intercept_log("DEBUG", f"{component}: {message}", task_id)
+
+
+_original_progress = progress
+def progress(component: str, message: str, task_id: Optional[str] = None, exc_info: bool = False):
+    """Log a progress message that should always be shown."""
+    _original_progress(component, message, task_id, exc_info=exc_info)
+    _intercept_log("INFO", f"{component}: {message}", task_id)
+
+
+_original_status = status
+def status(component: str, message: str, task_id: Optional[str] = None, exc_info: bool = False):
+    """Log a status message that should always be shown."""
+    _original_status(component, message, task_id, exc_info=exc_info)
+    _intercept_log("INFO", f"{component}: {message}", task_id)

@@ -73,14 +73,25 @@ def convert_to_wgp_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask")
     """
     from source.core.params import TaskConfig
 
+    queue.logger.debug(f"[CONVERT_DEBUG] Starting convert_to_wgp_task_impl for task {task.id}")
+    queue.logger.debug(f"[CONVERT_DEBUG] Task model: {task.model}")
+    queue.logger.debug(f"[CONVERT_DEBUG] Task parameters keys: {list(task.parameters.keys())}")
+
     # Parse into typed config
-    config = TaskConfig.from_db_task(
-        task.parameters,
-        task_id=task.id,
-        task_type=task.parameters.get('_source_task_type', ''),
-        model=task.model,
-        debug_mode=is_debug_enabled()
-    )
+    try:
+        config = TaskConfig.from_db_task(
+            task.parameters,
+            task_id=task.id,
+            task_type=task.parameters.get('_source_task_type', ''),
+            model=task.model,
+            debug_mode=is_debug_enabled()
+        )
+        queue.logger.debug(f"[CONVERT_DEBUG] TaskConfig parsed successfully")
+    except Exception as e:
+        queue.logger.error(f"[CONVERT_DEBUG] Failed to parse TaskConfig: {type(e).__name__}: {e}")
+        import traceback
+        queue.logger.error(f"[CONVERT_DEBUG] Traceback:\n{traceback.format_exc()}")
+        raise
 
     # Add prompt and model
     config.generation.prompt = task.prompt
@@ -89,6 +100,8 @@ def convert_to_wgp_task_impl(queue: "HeadlessTaskQueue", task: "GenerationTask")
     # Log the parsed config
     if is_debug_enabled():
         config.log_summary(queue.logger.info)
+
+    queue.logger.debug(f"[CONVERT_DEBUG] Config after prompt/model assignment")
 
     # Handle LoRA downloads if any are pending
     if config.lora.has_pending_downloads():

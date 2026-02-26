@@ -616,7 +616,22 @@ class WanOrchestrator:
             resolved_params = task_explicit_params.copy()
             generation_logger.info(f"[PASSTHROUGH] Using task parameters directly without resolution: {len(resolved_params)} params")
         else:
-            resolved_params = self._resolve_parameters(effective_model_type, task_explicit_params)
+            generation_logger.info(f"[PARAM_RESOLUTION] Starting parameter resolution for model '{effective_model_type}'")
+            try:
+                resolved_params = self._resolve_parameters(effective_model_type, task_explicit_params)
+                generation_logger.info(f"[PARAM_RESOLUTION] RETURNED successfully: type={type(resolved_params).__name__}, len={len(resolved_params) if isinstance(resolved_params, dict) else 'N/A'}")
+            except Exception as e:
+                generation_logger.critical(f"[PARAM_RESOLUTION] FAILED with {type(e).__name__}: {e}")
+                import traceback
+                generation_logger.critical(f"[PARAM_RESOLUTION] Traceback:\n{traceback.format_exc()}")
+                raise
+
+            # AGGRESSIVE: Dump all guidance-related params
+            generation_logger.info(f"[AGGRESSIVE] Resolved parameters for guidance:")
+            guidance_params = {k: v for k, v in resolved_params.items() if 'guidance' in k or 'phase' in k or 'switch' in k}
+            for k, v in guidance_params.items():
+                generation_logger.info(f"  {k}: {type(v).__name__} = {repr(v)[:100]}")
+
             generation_logger.info(f"[PARAM_RESOLUTION] Final parameters for '{effective_model_type}': num_inference_steps={resolved_params.get('num_inference_steps')}, guidance_scale={resolved_params.get('guidance_scale')}")
 
         # Determine model types for generation
@@ -667,7 +682,7 @@ class WanOrchestrator:
             video_prompt_type=video_prompt_type,
             control_net_weight=control_net_weight,
             control_net_weight2=control_net_weight2,
-            min_frames=17 if self._is_ltx2() else 5,
+            model_type=effective_model_type,
         )
         image_mode = model_params["image_mode"]
         actual_video_length = model_params["actual_video_length"]
@@ -805,8 +820,12 @@ class WanOrchestrator:
                 self._log_final_params(_filtered_params)
 
                 # Execute WGP with capture (delegated to capture module)
+                # Extract task_id from kwargs for logging context
+                task_id_for_logging = kwargs.get("task_id") or _filtered_params.get("task_id")
                 _, captured_stdout, captured_stderr, captured_logs = run_with_capture(
                     self._generate_video,
+                    task_id=task_id_for_logging,
+                    log_func=generation_logger.debug,
                     **_filtered_params,
                 )
 
@@ -830,7 +849,7 @@ class WanOrchestrator:
 
             return output_path
 
-        except (RuntimeError, ValueError, OSError, TypeError) as e:
+        except (RuntimeError, ValueError, OSError, TypeError, AttributeError) as e:
             generation_logger.error(f"Generation failed: {e}")
             try:
                 # If run_with_capture raised, captured output is attached to the exception
@@ -840,6 +859,11 @@ class WanOrchestrator:
                 log_captured_output(exc_stdout, exc_stderr, exc_logs)
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
                 pass  # Don't let logging errors mask the original exception
+            try:
+                from source.core.log import flush_log_buffer
+                flush_log_buffer()
+            except (ImportError, AttributeError, OSError):
+                pass  # Don't let flush errors mask the original exception
             raise
 
     # ------------------------------------------------------------------
@@ -956,8 +980,8 @@ class WanOrchestrator:
             if key == 'state':
                 state_summary = {
                     'model_type': value.get('model_type'),
-                    'gen_file_count': len(value.get('gen', {}).get('file_list', [])),
-                    'loras_count': len(value.get('loras', []))
+                    'gen_file_count': len((value.get('gen') or {}).get('file_list', [])),
+                    'loras_count': len(value.get('loras') or [])
                 }
                 generation_logger.info(f"[FINAL_PARAMS] {key}: {state_summary} (truncated)")
             elif key in ('guidance_scale', 'guidance2_scale', 'guidance3_scale', 'num_inference_steps', 'switch_threshold', 'switch_threshold2'):

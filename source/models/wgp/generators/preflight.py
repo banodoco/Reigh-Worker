@@ -72,7 +72,7 @@ def configure_model_specific_params(
     video_prompt_type: Optional[str],
     control_net_weight: Optional[float],
     control_net_weight2: Optional[float],
-    min_frames: int = 5,
+    model_type: str = "",
 ) -> Dict[str, Any]:
     """Compute model-specific generation parameters.
 
@@ -100,11 +100,10 @@ def configure_model_specific_params(
         min_frames = 5  # Safe default
         try:
             from wgp import get_model_min_frames_and_step
-            _min, _step, _latent = get_model_min_frames_and_step(
-                resolved_params.get("model") or resolved_params.get("model_name", "")
-            )
+            _model_key = model_type or resolved_params.get("model") or resolved_params.get("model_name", "")
+            _min, _step, _latent = get_model_min_frames_and_step(_model_key)
             min_frames = max(_min, 5)
-        except (ImportError, TypeError, ValueError, KeyError):
+        except (ImportError, TypeError, ValueError, KeyError, AttributeError):
             pass
         if actual_video_length < min_frames:
             generation_logger.warning(
