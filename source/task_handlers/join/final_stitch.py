@@ -7,6 +7,7 @@ This is the second phase of the parallel join architecture:
 """
 
 import json
+import shutil
 from pathlib import Path
 from typing import Tuple
 
@@ -23,6 +24,57 @@ from ...media.video import (
     add_audio_to_video)
 from ... import db_operations as db_ops
 from source.core.log import orchestrator_logger
+
+
+def _materialize_chain_passthrough_output(
+    *,
+    chain_output: str,
+    task_id: str,
+    main_output_dir_base: Path,
+) -> str:
+    """Create a task-scoped local artifact for chain passthrough completion."""
+    task_output_path, _ = prepare_output_path_with_upload(
+        task_id=task_id,
+        filename=f"{task_id}_joined.mp4",
+        main_output_dir_base=main_output_dir_base,
+        task_type="join_final_stitch",
+    )
+    task_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    previous_output_path = Path(chain_output)
+    if previous_output_path.exists():
+        if previous_output_path.resolve() != task_output_path.resolve():
+            shutil.copy2(previous_output_path, task_output_path)
+        if task_output_path.stat().st_size == 0:
+            raise ValueError(
+                f"Chain passthrough local output is empty for task {task_id}: {task_output_path}"
+            )
+        return str(task_output_path)
+
+    downloaded_output_path = download_video_if_url(
+        chain_output,
+        download_target_dir=task_output_path.parent,
+        task_id_for_logging=task_id,
+        descriptive_name="chain_passthrough",
+    )
+    if not downloaded_output_path:
+        raise ValueError(
+            f"Failed to download chain passthrough output for task {task_id}: {chain_output}"
+        )
+
+    downloaded_path = Path(downloaded_output_path)
+    if downloaded_path.resolve() != task_output_path.resolve():
+        if task_output_path.exists():
+            task_output_path.unlink()
+        shutil.move(str(downloaded_path), str(task_output_path))
+
+    if not task_output_path.exists() or task_output_path.stat().st_size == 0:
+        raise ValueError(
+            f"Chain passthrough output was not materialized for task {task_id}: {task_output_path}"
+        )
+
+    return str(task_output_path)
+
 
 def handle_join_final_stitch(
     task_params_from_db: dict,
@@ -78,7 +130,12 @@ def handle_join_final_stitch(
             if audio_url:
                 orchestrator_logger.debug(f"[FINAL_STITCH] Task {task_id}: Audio requested \u2014 already muxed by last chain join, passthrough")
 
-            return True, chain_output
+            task_scoped_output = _materialize_chain_passthrough_output(
+                chain_output=chain_output,
+                task_id=task_id,
+                main_output_dir_base=main_output_dir_base,
+            )
+            return True, task_scoped_output
 
         # --- 1. Extract Parameters ---
         clip_list = task_params_from_db.get("clip_list", [])
