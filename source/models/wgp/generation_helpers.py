@@ -237,6 +237,12 @@ def is_t2v(orchestrator) -> bool:
     return base_type in ["t2v", "t2v_1.3B", "hunyuan", "ltxv_13B", "ltx2_19B"]
 
 
+def is_ltx2(orchestrator) -> bool:
+    """Check if current model is an LTX-2 model."""
+    base_type = (orchestrator._get_base_model_type(orchestrator.current_model) or "").lower()
+    return base_type.startswith("ltx2")
+
+
 def is_qwen(orchestrator) -> bool:
     """Check if current model is a Qwen image model."""
     try:

@@ -43,6 +43,7 @@ from source.task_handlers.travel.segment_processor import TravelSegmentProcessor
 from source.utils import (
     parse_resolution,
     snap_resolution_to_model_grid,
+    get_model_grid_size,
     ensure_valid_prompt,
     ensure_valid_negative_prompt,
     download_image_if_url
