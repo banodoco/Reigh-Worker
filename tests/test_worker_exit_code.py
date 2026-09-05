@@ -183,7 +183,8 @@ def test_post_launch_publication_failure_cleans_up_and_restores_handlers(
         signal.SIGINT: signal.getsignal(signal.SIGINT),
         signal.SIGTERM: signal.getsignal(signal.SIGTERM),
     }
-    marker = lambda _signum, _frame: None
+    def marker(_signum, _frame):
+        return None
     signal.signal(signal.SIGINT, marker)
     signal.signal(signal.SIGTERM, marker)
     try:
