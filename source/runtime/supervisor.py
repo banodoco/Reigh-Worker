@@ -9,6 +9,7 @@ exit status unchanged.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -16,8 +17,9 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
+from urllib.parse import urlsplit
 
 
 GENERIC_HOST_MODULE = "astrid.core.execution.generic_host"
@@ -39,12 +41,33 @@ HOST_ENV_ALLOWLIST = frozenset(
         "XDG_RUNTIME_DIR",
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
+        "ASTRID_HOST_READINESS_PROFILE_PATH",
+        "ASTRID_HOST_READINESS_PROFILE_HASH",
     }
 )
 
 
 class LauncherConfigurationError(ValueError):
     """A trusted host binding is missing or unsafe."""
+
+
+@dataclass(frozen=True)
+class RuntimeDiscovery:
+    """The immutable, secret-free Runtime record consumed by the Worker."""
+
+    endpoint: str
+    port: int
+    pid: int
+    process_birth_id: str
+    runtime_instance_id: str
+    coordinator_epoch: str
+    active_realm: str
+    protocol_version: str
+    schema_version: str
+    worker_credential_file: Path
+    worker_actor: str
+    worker_scopes: tuple[str, ...]
+    snapshot_digest: str
 
 
 def _required_env(name: str, environ: Mapping[str, str]) -> str:
@@ -107,6 +130,8 @@ class HostLaunchConfig:
     boot_manifest_path: Path
     boot_manifest_hash: str
     capability_matrix: Path | None = None
+    readiness_profile_path: Path | None = None
+    readiness_profile_hash: str | None = None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "HostLaunchConfig":
@@ -166,6 +191,8 @@ class HostLaunchConfig:
         ]
         if self.capability_matrix is not None:
             args.extend(("--capability-matrix", str(self.capability_matrix)))
+        if self.readiness_profile_path is not None and self.readiness_profile_hash is not None:
+            args.extend(("--readiness-profile-path", str(self.readiness_profile_path), "--readiness-profile-hash", self.readiness_profile_hash))
         return args
 
 
@@ -175,6 +202,9 @@ def _host_environment(environ: Mapping[str, str], config: HostLaunchConfig) -> d
     # checkout is the sole code root admitted to this host.
     child_env["PYTHONPATH"] = str(config.source_checkout)
     child_env["PYTHONUNBUFFERED"] = "1"
+    if config.readiness_profile_path is not None and config.readiness_profile_hash is not None:
+        child_env["ASTRID_HOST_READINESS_PROFILE_PATH"] = str(config.readiness_profile_path)
+        child_env["ASTRID_HOST_READINESS_PROFILE_HASH"] = config.readiness_profile_hash
     return child_env
 
 
@@ -245,11 +275,182 @@ def _ready_file_is_owned(path: Path, process: subprocess.Popen[bytes]) -> bool:
     )
 
 
+def _loopback_endpoint(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port is not None
+
+
+def _safe_record_path(path: Path, *, support_root: Path, label: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise LauncherConfigurationError(f"{label} must be an owner-only regular file")
+    if path.stat().st_uid != getattr(os, "getuid", lambda: path.stat().st_uid)():
+        raise LauncherConfigurationError(f"{label} owner does not match the Worker")
+    if path.stat().st_mode & 0o022:
+        raise LauncherConfigurationError(f"{label} is writable by another principal")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(support_root):
+        raise LauncherConfigurationError(f"{label} must remain beneath the support root")
+    return resolved
+
+
+def _read_runtime_discovery(config: HostLaunchConfig) -> RuntimeDiscovery:
+    from source.runtime.worker.preflight import _process_birth_identity
+
+    support_root = config.support_root.resolve(strict=True)
+    discovery_path = support_root / "discovery.json"
+    if discovery_path.is_symlink() or not discovery_path.is_file():
+        raise LauncherConfigurationError("canonical Runtime discovery.json is required")
+    stat_result = discovery_path.stat()
+    if stat_result.st_uid != getattr(os, "getuid", lambda: stat_result.st_uid)() or stat_result.st_mode & 0o022:
+        raise LauncherConfigurationError("Runtime discovery.json ownership is unsafe")
+    raw = discovery_path.read_bytes()
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LauncherConfigurationError("Runtime discovery.json is malformed") from exc
+    allowed = {
+        "version", "endpoint", "pid", "process_birth_id", "active_realm", "runtime_instance_id",
+        "protocol_version", "schema_version", "coordinator_epoch", "credential_file",
+        "worker_credential_file", "worker_actor", "worker_scopes",
+    }
+    if not isinstance(record, dict) or set(record) != allowed:
+        raise LauncherConfigurationError("Runtime discovery.json schema is invalid")
+    endpoint = record.get("endpoint")
+    parsed = urlsplit(endpoint) if isinstance(endpoint, str) else None
+    port = parsed.port if parsed else None
+    if record.get("version") != 1 or not parsed or not _loopback_endpoint(endpoint) or port is None:
+        raise LauncherConfigurationError("Runtime discovery endpoint or version is invalid")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise LauncherConfigurationError("Runtime discovery endpoint is not canonical")
+    if any(not isinstance(record.get(name), str) or not record[name].strip() for name in (
+        "process_birth_id", "active_realm", "runtime_instance_id", "protocol_version", "schema_version", "coordinator_epoch",
+    )):
+        raise LauncherConfigurationError("Runtime discovery identity is incomplete")
+    if record["protocol_version"] != "workspace.v1" or record["coordinator_epoch"] != record["runtime_instance_id"]:
+        raise LauncherConfigurationError("Runtime discovery protocol or coordinator identity is invalid")
+    pid = record.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise LauncherConfigurationError("Runtime discovery PID is invalid")
+    if _process_birth_identity(pid) != record["process_birth_id"]:
+        raise LauncherConfigurationError("Runtime discovery process birth identity is stale")
+    worker_actor = record.get("worker_actor")
+    worker_scopes = record.get("worker_scopes")
+    expected_scopes = {
+        "handshake", "worker:register", "worker:execute", "tasks:read", "objects:read", "objects:write",
+    }
+    if worker_actor != "astrid-pack-host" or not isinstance(worker_scopes, list) or set(worker_scopes) != expected_scopes or len(worker_scopes) != len(expected_scopes):
+        raise LauncherConfigurationError("Runtime worker credential scope is invalid")
+    worker_raw = record.get("worker_credential_file")
+    if not isinstance(worker_raw, str) or not Path(worker_raw).is_absolute():
+        raise LauncherConfigurationError("Runtime worker credential reference is invalid")
+    worker_path = _safe_record_path(Path(worker_raw), support_root=support_root, label="Runtime worker credential")
+    if worker_path.stat().st_mode & 0o777 != 0o600:
+        raise LauncherConfigurationError("Runtime worker credential must be owner-only")
+    if config.runtime_endpoint.rstrip("/") != endpoint.rstrip("/"):
+        raise LauncherConfigurationError("configured Runtime endpoint conflicts with discovery")
+    if config.runtime_instance_id != record["runtime_instance_id"]:
+        raise LauncherConfigurationError("configured Runtime instance conflicts with discovery")
+    try:
+        configured_credential = config.credential_file.resolve(strict=True)
+    except OSError as exc:
+        raise LauncherConfigurationError("configured Runtime credential is unavailable") from exc
+    if configured_credential != worker_path:
+        raise LauncherConfigurationError("configured credential is not the scoped Worker credential")
+    return RuntimeDiscovery(
+        endpoint=endpoint.rstrip("/"), port=port, pid=pid, process_birth_id=record["process_birth_id"],
+        runtime_instance_id=record["runtime_instance_id"], coordinator_epoch=record["coordinator_epoch"],
+        active_realm=record["active_realm"], protocol_version=record["protocol_version"], schema_version=record["schema_version"],
+        worker_credential_file=worker_path, worker_actor=worker_actor, worker_scopes=tuple(worker_scopes),
+        snapshot_digest="sha256:" + hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _prepare_worker_readiness(config: HostLaunchConfig, environ: Mapping[str, str]) -> tuple[Path, str]:
+    """Bind discovery, verify neutral facts, and publish one HC-03 profile."""
+
+    from source.runtime.worker.preflight import (
+        RuntimeBinding,
+        _probe_runtime_binding,
+        _read_runtime_health,
+        _verify_runtime_process,
+        run_neutral_worker_preflight,
+    )
+
+    profile_path = config.support_root / "worker-readiness-profile.json"
+    profile_path.unlink(missing_ok=True)
+    discovery = _read_runtime_discovery(config)
+    provisional = RuntimeBinding(
+        endpoint=discovery.endpoint, port=discovery.port, pid=discovery.pid,
+        process_birth_id=discovery.process_birth_id, runtime_instance_id=discovery.runtime_instance_id,
+        runtime_epoch=1, schema_digest="sha256:" + "0" * 64, credential_path=discovery.worker_credential_file,
+    )
+    _verify_runtime_process(provisional)
+    health = _read_runtime_health(provisional)
+    if health.get("status") != "ok" or health.get("protocol") != "workspace.v1":
+        raise LauncherConfigurationError("Runtime health status or protocol conflicts with discovery")
+    if not isinstance(health.get("schema_digest"), str) or not isinstance(health.get("runtime_epoch"), int):
+        raise LauncherConfigurationError("Runtime health identity is incomplete")
+    binding = RuntimeBinding(
+        endpoint=discovery.endpoint, port=discovery.port, pid=discovery.pid,
+        process_birth_id=discovery.process_birth_id, runtime_instance_id=discovery.runtime_instance_id,
+        runtime_epoch=health["runtime_epoch"], schema_digest=health["schema_digest"], credential_path=discovery.worker_credential_file,
+    )
+    _probe_runtime_binding(binding)
+    if _read_runtime_discovery(config).snapshot_digest != discovery.snapshot_digest:
+        raise LauncherConfigurationError("Runtime discovery changed during readiness verification")
+    fact_inputs = {
+        name: environ.get(name, "")
+        for name in (
+            "REIGH_INTERPRETER", "REIGH_ENGINE_INTERPRETER", "REIGH_RUNTIME_LOCK_PATH", "REIGH_ENGINE_LOCK_PATH",
+            "REIGH_MODEL_ROOT", "REIGH_MODEL_MANIFEST_PATH", "REIGH_CUSTOM_NODE_ROOT", "REIGH_CUSTOM_NODE_MANIFEST_PATH",
+            "REIGH_SCRATCH_ROOT", "REIGH_CAS_ROOT", "REIGH_OUTPUT_ROOT",
+        )
+    }
+    result = run_neutral_worker_preflight(
+        repo_root=config.source_checkout,
+        main_output_dir=Path(fact_inputs.get("REIGH_OUTPUT_ROOT") or (config.support_root / "outputs")),
+        fact_inputs=fact_inputs,
+        runtime_binding=binding,
+    )
+    if not result.ready_for_tasks:
+        raise LauncherConfigurationError("neutral Worker readiness facts are incomplete or failed")
+    metadata = result.to_metadata()
+    payload = {
+        "schema_version": "hc03-worker-readiness.v1",
+        "status": "ready",
+        "verified_facts": metadata["verified_facts"],
+        "verified_facts_digest": metadata["verified_facts_digest"],
+        "runtime": {
+            "endpoint": binding.endpoint, "port": binding.port, "pid": binding.pid,
+            "process_birth_id": binding.process_birth_id, "runtime_instance_id": binding.runtime_instance_id,
+            "runtime_epoch": binding.runtime_epoch, "schema_digest": binding.schema_digest,
+            "coordinator_epoch": discovery.coordinator_epoch, "active_realm": discovery.active_realm,
+            "credential_reference": str(binding.credential_path), "discovery_digest": discovery.snapshot_digest,
+        },
+        "launch": {
+            "host_interpreter": str(config.host_python), "source_checkout": str(config.source_checkout),
+            "engine_interpreter": fact_inputs.get("REIGH_ENGINE_INTERPRETER"),
+            "output_root": fact_inputs.get("REIGH_OUTPUT_ROOT"), "pack_root": str(config.pack_root), "support_root": str(config.support_root),
+            "ready_file": str(config.ready_file), "state_file": str(config.state_file),
+            "boot_manifest_path": str(config.boot_manifest_path), "boot_manifest_hash": config.boot_manifest_hash,
+        },
+        "worker_actor": discovery.worker_actor, "worker_scopes": list(discovery.worker_scopes),
+    }
+    try:
+        _atomic_write_json(profile_path, payload)
+        profile_hash = "sha256:" + hashlib.sha256(profile_path.read_bytes()).hexdigest()
+    except (OSError, TypeError, ValueError) as exc:
+        profile_path.unlink(missing_ok=True)
+        raise LauncherConfigurationError("HC-03 readiness profile publication failed") from exc
+    return profile_path, profile_hash
+
+
 def launch_generic_pack_host(
     config: HostLaunchConfig,
     *,
     environ: Mapping[str, str] | None = None,
     ready_timeout_seconds: float = 20.0,
+    enforce_readiness: bool | None = None,
 ) -> int:
     """Start exactly one host and return its exit status.
 
@@ -259,6 +460,19 @@ def launch_generic_pack_host(
     """
 
     env = os.environ if environ is None else environ
+    if enforce_readiness is None:
+        # Direct unit fixtures historically exercise process containment with a
+        # non-Runtime endpoint.  Every supported loopback launch is gated.
+        enforce_readiness = _loopback_endpoint(config.runtime_endpoint) or (config.support_root / "discovery.json").exists()
+    if enforce_readiness:
+        try:
+            profile_path, profile_hash = _prepare_worker_readiness(config, env)
+            config = replace(config, readiness_profile_path=profile_path, readiness_profile_hash=profile_hash)
+        except LauncherConfigurationError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            (config.support_root / "worker-readiness-profile.json").unlink(missing_ok=True)
+            raise LauncherConfigurationError("Worker readiness preparation failed") from exc
     argv = config.argv()
     child_env = _host_environment(env, config)
     config.ready_file.unlink(missing_ok=True)
@@ -289,6 +503,10 @@ def launch_generic_pack_host(
         cleanup_complete = True
         _terminate_and_wait(child, owned_pgid)
 
+    def _invalidate_profile() -> None:
+        if config.readiness_profile_path is not None:
+            config.readiness_profile_path.unlink(missing_ok=True)
+
     try:
         try:
             child = subprocess.Popen(
@@ -312,6 +530,7 @@ def launch_generic_pack_host(
                     )
             owned_pgid = child.pid
         except BaseException:
+            _invalidate_profile()
             if child is not None and owned_pgid is not None:
                 _cleanup_host()
             raise
@@ -342,6 +561,7 @@ def launch_generic_pack_host(
 
             if not ready:
                 _cleanup_host()
+                _invalidate_profile()
                 returncode = _normalize_returncode(child.returncode)
                 _atomic_write_json(
                     config.state_file,
@@ -364,6 +584,7 @@ def launch_generic_pack_host(
             return returncode
         except BaseException:
             _cleanup_host()
+            _invalidate_profile()
             return 78
     finally:
         signal.signal(signal.SIGINT, previous_handlers[signal.SIGINT])
@@ -376,7 +597,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     del argv
     try:
         config = HostLaunchConfig.from_environment()
-        return launch_generic_pack_host(config)
+        return launch_generic_pack_host(
+            config,
+            enforce_readiness=_loopback_endpoint(config.runtime_endpoint)
+            or (config.support_root / "discovery.json").exists(),
+        )
     except LauncherConfigurationError as exc:
         print(f"Worker launcher configuration error: {exc}", file=sys.stderr)
         return 78
@@ -388,6 +613,7 @@ __all__ = [
     "HOST_ENV_ALLOWLIST",
     "HostLaunchConfig",
     "LauncherConfigurationError",
+    "RuntimeDiscovery",
     "launch_generic_pack_host",
     "main",
 ]

@@ -136,8 +136,8 @@ class FactProbeOverrides:
 class RuntimeBinding:
     """The single Runtime endpoint handoff shared with Astrid's host.
 
-    B02-T03 must pass this object from Runtime discovery/launch materialization;
-    this Worker intentionally has no resolver for discovery, ports, or credentials.
+    The Worker materializes this object from the canonical Runtime discovery
+    record before host creation; Astrid consumes the resulting HC-03 profile.
     """
 
     endpoint: str
@@ -156,6 +156,7 @@ def collect_verified_facts(
     main_output_dir: Path,
     probes: FactProbeOverrides | None = None,
     runtime_binding: RuntimeBinding | None = None,
+    fact_inputs: Mapping[str, Any] | None = None,
 ) -> tuple[VerifiedFacts, list[PreflightCheck]]:
     """Collect only independently verifiable, HC-02-shaped host facts.
 
@@ -169,15 +170,16 @@ def collect_verified_facts(
     exact: dict[str, str | int] = {}
     minimum: dict[str, int] = {}
     probes = probes or FactProbeOverrides()
+    configured = fact_inputs or os.environ
 
     interpreter_identities: list[str] = []
     interpreter_names = ["REIGH_INTERPRETER"]
     for env_name in ("REIGH_ASTRID_INTERPRETER", "REIGH_ENGINE_INTERPRETER"):
-        if os.environ.get(env_name):
+        if configured.get(env_name):
             interpreter_names.append(env_name)
     for env_name in interpreter_names:
-        configured = os.environ.get(env_name) or sys.executable
-        identity, detail = _probe_interpreter(Path(configured))
+        interpreter = configured.get(env_name) or sys.executable
+        identity, detail = _probe_interpreter(Path(interpreter))
         ok = identity is not None
         checks.append(PreflightCheck(f"fact:{env_name.lower()}", ok, detail))
         if identity is not None:
@@ -185,31 +187,32 @@ def collect_verified_facts(
     if interpreter_identities and len(interpreter_identities) == len(interpreter_names):
         exact["interpreter"] = json.dumps(interpreter_identities, separators=(",", ":"))
 
-    runtime_lock = _configured_path("REIGH_RUNTIME_LOCK_PATH", repo_root / "uv.lock")
+    runtime_lock = _configured_path("REIGH_RUNTIME_LOCK_PATH", repo_root / "uv.lock", environ=configured)
     runtime_digest, detail = _digest_file(runtime_lock)
     checks.append(PreflightCheck("fact:runtime_lock", runtime_digest is not None, detail))
     if runtime_digest is not None:
         exact["runtime_lock"] = runtime_digest
 
-    engine_lock = _configured_path("REIGH_ENGINE_LOCK_PATH")
+    engine_lock = _configured_path("REIGH_ENGINE_LOCK_PATH", environ=configured)
     engine_digest, detail = _digest_file(engine_lock)
     checks.append(PreflightCheck("fact:engine_lock", engine_digest is not None, detail))
     if engine_digest is not None:
         exact["engine_lock"] = engine_digest
 
-    model_root = _configured_path("REIGH_MODEL_ROOT")
-    model_manifest = _configured_path("REIGH_MODEL_MANIFEST_PATH")
+    model_root = _configured_path("REIGH_MODEL_ROOT", environ=configured)
+    model_manifest = _configured_path("REIGH_MODEL_MANIFEST_PATH", environ=configured)
     model_digest, detail = _digest_manifest(model_root, model_manifest, label="model")
     checks.append(PreflightCheck("fact:model_digest", model_digest is not None, detail))
     if model_digest is not None:
         exact["model_digest"] = model_digest
 
-    custom_root = _configured_path("REIGH_CUSTOM_NODE_ROOT")
+    custom_root = _configured_path("REIGH_CUSTOM_NODE_ROOT", environ=configured)
     custom_manifest = _configured_path(
         "REIGH_CUSTOM_NODE_MANIFEST_PATH",
-        _configured_path("REIGH_CUSTOM_NODE_LOCK_PATH"),
+        _configured_path("REIGH_CUSTOM_NODE_LOCK_PATH", environ=configured),
+        environ=configured,
     )
-    if os.environ.get("REIGH_CUSTOM_NODE_LOCK_PATH") and not os.environ.get("REIGH_CUSTOM_NODE_MANIFEST_PATH"):
+    if configured.get("REIGH_CUSTOM_NODE_LOCK_PATH") and not configured.get("REIGH_CUSTOM_NODE_MANIFEST_PATH"):
         custom_digest, detail = _digest_file(custom_manifest)
     else:
         custom_digest, detail = _digest_manifest(custom_root, custom_manifest, label="custom-node")
@@ -231,7 +234,7 @@ def collect_verified_facts(
         checks.append(PreflightCheck("fact:gpu_driver", False, str(exc)))
         checks.append(PreflightCheck("fact:vram_bytes", False, str(exc)))
 
-    scratch_root = _configured_path("REIGH_SCRATCH_ROOT", main_output_dir)
+    scratch_root = _configured_path("REIGH_SCRATCH_ROOT", main_output_dir, environ=configured)
     scratch_identity, detail = _strict_root_identity(scratch_root)
     if scratch_identity is None:
         checks.append(PreflightCheck("fact:scratch_root", False, detail))
@@ -254,7 +257,7 @@ def collect_verified_facts(
         ("model", model_root),
         ("custom_node", custom_root),
         ("scratch", scratch_root),
-        ("cas", _configured_path("REIGH_CAS_ROOT", main_output_dir)),
+        ("cas", _configured_path("REIGH_CAS_ROOT", main_output_dir, environ=configured)),
     ):
         identity, detail = _strict_root_identity(path)
         checks.append(PreflightCheck(f"fact:root:{name}", identity is not None, detail))
@@ -366,8 +369,67 @@ def run_worker_preflight(
     return result
 
 
-def _configured_path(env_name: str, default: Path | None = None) -> Path | None:
-    raw = os.environ.get(env_name)
+def run_neutral_worker_preflight(
+    *,
+    repo_root: Path,
+    main_output_dir: Path,
+    fact_inputs: Mapping[str, Any],
+    runtime_binding: RuntimeBinding,
+    probes: FactProbeOverrides | None = None,
+) -> WorkerPreflightResult:
+    """Run explicit engine-neutral HC-02 checks before host creation."""
+
+    started_at = time.time()
+    checks: list[PreflightCheck] = []
+    _append_path_check(checks, "repo_root", repo_root, expected_type="dir")
+    _append_writable_dir_check(checks, "main_output_dir", main_output_dir)
+    required_inputs = (
+        "REIGH_INTERPRETER",
+        "REIGH_RUNTIME_LOCK_PATH",
+        "REIGH_ENGINE_LOCK_PATH",
+        "REIGH_MODEL_ROOT",
+        "REIGH_MODEL_MANIFEST_PATH",
+        "REIGH_CUSTOM_NODE_ROOT",
+        "REIGH_CUSTOM_NODE_MANIFEST_PATH",
+        "REIGH_SCRATCH_ROOT",
+        "REIGH_CAS_ROOT",
+        "REIGH_OUTPUT_ROOT",
+    )
+    for name in required_inputs:
+        value = fact_inputs.get(name)
+        checks.append(
+            PreflightCheck(
+                f"input:{name.lower()}",
+                isinstance(value, (str, Path)) and bool(str(value).strip()),
+                "explicit" if value else "required",
+            )
+        )
+    facts, fact_checks = collect_verified_facts(
+        repo_root=repo_root,
+        main_output_dir=main_output_dir,
+        probes=probes,
+        runtime_binding=runtime_binding,
+        fact_inputs=fact_inputs,
+    )
+    checks.extend(fact_checks)
+    status = PREFLIGHT_STATUS_PASSED if all(check.ok or not check.required for check in checks) else PREFLIGHT_STATUS_FAILED
+    return WorkerPreflightResult(
+        status=status,
+        checks=checks,
+        started_at=started_at,
+        completed_at=time.time(),
+        phase="neutral",
+        verified_facts=facts,
+    )
+
+
+def _configured_path(
+    env_name: str,
+    default: Path | None = None,
+    *,
+    environ: Mapping[str, Any] | None = None,
+) -> Path | None:
+    raw = (os.environ if environ is None else environ).get(env_name)
     if raw is not None and raw.strip():
         return Path(raw).expanduser()
     return default
@@ -544,6 +606,20 @@ def _gpu_driver_identity(gpu: Mapping[str, Any]) -> str:
 
 def _probe_runtime_binding(binding: RuntimeBinding) -> Mapping[str, Any]:
     _validate_runtime_binding(binding)
+    _verify_runtime_process(binding)
+    health = _read_runtime_health(binding)
+    expected = {
+        "status": "ok",
+        "protocol": RUNTIME_PROTOCOL,
+        "schema_digest": binding.schema_digest,
+        "runtime_epoch": binding.runtime_epoch,
+    }
+    if any(health.get(key) != value for key, value in expected.items()):
+        raise ValueError("Runtime health identity does not match the explicit binding")
+    return {"ok": True, "detail": f"{binding.endpoint} verified for Runtime instance {binding.runtime_instance_id}", **health}
+
+
+def _verify_runtime_process(binding: RuntimeBinding) -> None:
     if _process_birth_identity(binding.pid) != binding.process_birth_id:
         raise OSError("Runtime process birth identity is stale or mismatched")
     listener = subprocess.run(
@@ -564,6 +640,8 @@ def _probe_runtime_binding(binding: RuntimeBinding) -> Mapping[str, Any]:
     if listener.returncode != 0 or f":{binding.port} (LISTEN)" not in listener.stdout:
         raise OSError("Runtime endpoint is not owned by the bound process")
 
+
+def _read_runtime_health(binding: RuntimeBinding) -> Mapping[str, Any]:
     credential = binding.credential_path.read_text(encoding="utf-8").strip()
     request = Request(
         binding.endpoint.rstrip("/") + "/v1/health",
@@ -574,15 +652,15 @@ def _probe_runtime_binding(binding: RuntimeBinding) -> Mapping[str, Any]:
         health = json.loads(response.read().decode("utf-8"))
     if not isinstance(health, Mapping):
         raise ValueError("Runtime health response must be an object")
-    expected = {
-        "status": "ok",
-        "protocol": RUNTIME_PROTOCOL,
-        "schema_digest": binding.schema_digest,
-        "runtime_epoch": binding.runtime_epoch,
-    }
-    if any(health.get(key) != value for key, value in expected.items()):
-        raise ValueError("Runtime health identity does not match the explicit binding")
-    return {"ok": True, "detail": f"{binding.endpoint} verified for Runtime instance {binding.runtime_instance_id}"}
+    if health.get("status") != "ok" or health.get("protocol") != RUNTIME_PROTOCOL:
+        raise ValueError("Runtime health status or protocol is invalid")
+    schema_digest = health.get("schema_digest")
+    runtime_epoch = health.get("runtime_epoch")
+    if not isinstance(schema_digest, str) or not schema_digest.startswith("sha256:"):
+        raise ValueError("Runtime health schema digest is invalid")
+    if isinstance(runtime_epoch, bool) or not isinstance(runtime_epoch, int) or runtime_epoch < 1:
+        raise ValueError("Runtime health epoch is invalid")
+    return dict(health)
 
 
 def _validate_runtime_binding(binding: RuntimeBinding) -> None:
