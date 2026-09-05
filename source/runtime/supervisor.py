@@ -28,7 +28,6 @@ GENERIC_HOST_EXECUTOR_ID = "astrid-pack-host"
 HOST_ENV_ALLOWLIST = frozenset(
     {
         "PATH",
-        "HOME",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -208,6 +207,32 @@ def _signal_owned_group(process: subprocess.Popen[bytes], signum: int) -> None:
         pass
 
 
+def _signal_owned_pgid(pgid: int, signum: int) -> None:
+    if os.name == "nt":
+        return
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_and_wait(process: subprocess.Popen[bytes], pgid: int) -> None:
+    """Terminate and reap a verified host process group."""
+
+    if os.name == "nt":
+        process.terminate()
+    else:
+        _signal_owned_pgid(pgid, signal.SIGTERM)
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            _signal_owned_pgid(pgid, signal.SIGKILL)
+        process.wait(timeout=3)
+
+
 def _ready_file_is_owned(path: Path, process: subprocess.Popen[bytes]) -> bool:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -254,86 +279,95 @@ def launch_generic_pack_host(
     }
     signal.signal(signal.SIGINT, _forward_signal)
     signal.signal(signal.SIGTERM, _forward_signal)
+    owned_pgid: int | None = None
+    cleanup_complete = False
+
+    def _cleanup_host() -> None:
+        nonlocal cleanup_complete
+        if cleanup_complete or child is None or owned_pgid is None:
+            return
+        cleanup_complete = True
+        _terminate_and_wait(child, owned_pgid)
+
     try:
-        child = subprocess.Popen(
-            argv,
-            cwd=str(config.source_checkout),
-            env=child_env,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-        if os.name != "nt":
-            try:
-                own_group = os.getpgid(child.pid) == child.pid
-            except OSError:
-                own_group = False
-            if not own_group:
-                _signal_owned_group(child, signal.SIGTERM)
-                child.wait(timeout=3)
-                raise LauncherConfigurationError(
-                    "GenericPackHost did not become its own process-group leader"
-                )
-    except BaseException:
-        signal.signal(signal.SIGINT, previous_handlers[signal.SIGINT])
-        signal.signal(signal.SIGTERM, previous_handlers[signal.SIGTERM])
-        raise
-    state = {
-        "status": "starting",
-        "pid": child.pid,
-        "pgid": child.pid,
-        "argv": argv,
-        "interpreter": str(config.host_python),
-        "ready_file": str(config.ready_file),
-        "state_file": str(config.state_file),
-        "env_keys": sorted(child_env),
-        "allowed_env": sorted(HOST_ENV_ALLOWLIST | {"PYTHONPATH"}),
-    }
-    _atomic_write_json(config.state_file, state)
-
-    deadline = time.monotonic() + ready_timeout_seconds
-    ready = False
-    while time.monotonic() < deadline:
-        if _ready_file_is_owned(config.ready_file, child):
-            ready = True
-            break
-        if child.poll() is not None:
-            break
-        time.sleep(0.05)
-
-    if not ready:
-        _signal_owned_group(child, signal.SIGTERM)
         try:
-            child.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            _signal_owned_group(child, signal.SIGKILL)
-            child.wait(timeout=3)
-        returncode = _normalize_returncode(child.returncode)
-        _atomic_write_json(
-            config.state_file,
-            {**state, "status": "failed", "returncode": returncode, "ready": False, "signals": received},
-        )
-        signal.signal(signal.SIGINT, previous_handlers[signal.SIGINT])
-        signal.signal(signal.SIGTERM, previous_handlers[signal.SIGTERM])
-        return returncode or 1
+            child = subprocess.Popen(
+                argv,
+                cwd=str(config.source_checkout),
+                env=child_env,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            if os.name != "nt":
+                try:
+                    own_group = os.getpgid(child.pid) == child.pid
+                except OSError:
+                    own_group = False
+                if not own_group:
+                    child.terminate()
+                    child.wait(timeout=3)
+                    raise LauncherConfigurationError(
+                        "GenericPackHost did not become its own process-group leader"
+                    )
+            owned_pgid = child.pid
+        except BaseException:
+            if child is not None and owned_pgid is not None:
+                _cleanup_host()
+            raise
 
-    _atomic_write_json(config.state_file, {**state, "status": "ready", "ready": True})
-    try:
-        returncode = _normalize_returncode(child.wait())
+        try:
+            state = {
+                "status": "starting",
+                "pid": child.pid,
+                "pgid": owned_pgid,
+                "argv": argv,
+                "interpreter": str(config.host_python),
+                "ready_file": str(config.ready_file),
+                "state_file": str(config.state_file),
+                "env_keys": sorted(child_env),
+                "allowed_env": sorted(HOST_ENV_ALLOWLIST | {"PYTHONPATH"}),
+            }
+            _atomic_write_json(config.state_file, state)
+
+            deadline = time.monotonic() + ready_timeout_seconds
+            ready = False
+            while time.monotonic() < deadline:
+                if _ready_file_is_owned(config.ready_file, child):
+                    ready = True
+                    break
+                if child.poll() is not None:
+                    break
+                time.sleep(0.05)
+
+            if not ready:
+                _cleanup_host()
+                returncode = _normalize_returncode(child.returncode)
+                _atomic_write_json(
+                    config.state_file,
+                    {**state, "status": "failed", "returncode": returncode, "ready": False, "signals": received},
+                )
+                return returncode or 1
+
+            _atomic_write_json(config.state_file, {**state, "status": "ready", "ready": True})
+            returncode = _normalize_returncode(child.wait())
+            _atomic_write_json(
+                config.state_file,
+                {
+                    **state,
+                    "status": "exited",
+                    "ready": True,
+                    "returncode": returncode,
+                    "signals": received,
+                },
+            )
+            return returncode
+        except BaseException:
+            _cleanup_host()
+            return 78
     finally:
         signal.signal(signal.SIGINT, previous_handlers[signal.SIGINT])
         signal.signal(signal.SIGTERM, previous_handlers[signal.SIGTERM])
-    _atomic_write_json(
-        config.state_file,
-        {
-            **state,
-            "status": "exited",
-            "ready": True,
-            "returncode": returncode,
-            "signals": received,
-        },
-    )
-    return returncode
 
 
 def main(argv: Sequence[str] | None = None) -> int:

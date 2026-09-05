@@ -100,6 +100,7 @@ def test_host_environment_is_an_explicit_allowlist(tmp_path: Path) -> None:
     assert child["PATH"] == "/bin"
     assert child["PYTHONPATH"] == str(config.source_checkout)
     assert "SECRET" not in child
+    assert "HOME" not in child
 
 
 def test_atomic_state_is_owner_only(tmp_path: Path) -> None:
@@ -156,3 +157,43 @@ def test_worker_forwards_signal_to_owned_host_group(tmp_path: Path) -> None:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("failing_write", [1, 2])
+def test_post_launch_publication_failure_cleans_up_and_restores_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_write: int
+) -> None:
+    config = _config(tmp_path, sleep_seconds=30)
+    real_atomic_write = supervisor._atomic_write_json
+    writes = 0
+
+    def _fail_selected_write(path: Path, value: dict[str, object]) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == failing_write:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not config.ready_file.exists():
+                time.sleep(0.01)
+            assert config.ready_file.exists()
+            raise OSError("simulated publication failure")
+        real_atomic_write(path, value)
+
+    monkeypatch.setattr(supervisor, "_atomic_write_json", _fail_selected_write)
+    original_handlers = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    marker = lambda _signum, _frame: None
+    signal.signal(signal.SIGINT, marker)
+    signal.signal(signal.SIGTERM, marker)
+    try:
+        result = supervisor.launch_generic_pack_host(config, environ={"PATH": "/bin"})
+        assert result == 78
+        assert writes == failing_write
+        host_signal = json.loads((config.support_root / "host-signal.json").read_text(encoding="utf-8"))
+        assert host_signal["signal"] == signal.SIGTERM
+        assert signal.getsignal(signal.SIGINT) is marker
+        assert signal.getsignal(signal.SIGTERM) is marker
+    finally:
+        signal.signal(signal.SIGINT, original_handlers[signal.SIGINT])
+        signal.signal(signal.SIGTERM, original_handlers[signal.SIGTERM])
