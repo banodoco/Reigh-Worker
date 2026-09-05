@@ -157,7 +157,7 @@ def test_supported_entrypoint_has_no_second_authority() -> None:
     server_source = SERVER.read_text(encoding="utf-8")
     assert "while True" not in server_source
     assert all(symbol not in server_source for symbol in FORBIDDEN_SERVER_SYMBOLS)
-    assert "task authority remains external" in server_source
+    assert "Runtime remains the task authority" in server_source
 
 
 def test_preserved_authority_consumers_and_substrate_remain_present() -> None:
@@ -180,4 +180,4 @@ def test_preserved_authority_consumers_and_substrate_remain_present() -> None:
         assert (ROOT / relative_path).is_file(), relative_path
 
     server_module = import_module("source.runtime.worker.server")
-    assert callable(server_module.ensure_wan2gp_on_path)
+    assert callable(server_module.launch_generic_pack_host)

@@ -1,4 +1,4 @@
-"""Runtime supervisor entrypoint."""
+"""Supported Worker launcher entrypoint."""
 
 from __future__ import annotations
 

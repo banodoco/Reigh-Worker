@@ -1,4 +1,4 @@
-"""Runtime worker entrypoint."""
+"""Supported neutral Worker entrypoint."""
 
 from __future__ import annotations
 

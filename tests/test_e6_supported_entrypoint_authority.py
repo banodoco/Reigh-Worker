@@ -87,11 +87,8 @@ def test_supported_entrypoint_imports_without_legacy_authority() -> None:
 def test_supported_server_has_no_claimant_settlement_or_queue_lifecycle() -> None:
     source = _server_source()
     assert not any(symbol in source for symbol in FORBIDDEN_SERVER_SYMBOLS)
-    assert "run_bootstrap_once" in source
-    assert "get_bootstrap_controller" in source
-    assert "start_local_http_server" in source
-    assert "run_worker_preflight" in source
-    assert "publish_warm_cache_state" in source
+    assert "launch_generic_pack_host" in source
+    assert "Runtime remains the task authority" in source
     assert "while True" not in source
 
 
@@ -157,8 +154,8 @@ def test_replaced_vibe_aliases_are_explicitly_disposed() -> None:
 
 def test_preserved_wgp_progress_artifacts_and_video_enhance() -> None:
     server_module = import_module("source.runtime.worker.server")
-    assert callable(server_module.ensure_wan2gp_on_path)
-    assert "wgp_bridge" in _server_source()
+    assert callable(server_module.launch_generic_pack_host)
+    assert "REIGH_BACKEND" not in _server_source()
 
     conversion_source = (ROOT / "source" / "task_handlers" / "tasks" / "task_conversion.py").read_text(
         encoding="utf-8"
