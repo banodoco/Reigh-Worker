@@ -6,10 +6,13 @@ from pathlib import Path
 import pytest
 
 from source.runtime.vibecomfy_profile import (
+    EXACT_FACT_KEYS,
+    MINIMUM_FACT_KEYS,
     PROCESS_DEFAULT_PROFILE,
     VibeComfyProfileProtocol,
     build_memory_profile_cli_args,
     build_profile_protocol,
+    validate_verified_facts,
     resolve_memory_profile,
 )
 
@@ -79,3 +82,17 @@ def test_module_imports_no_vibecomfy_or_wgp_modules() -> None:
     assert "vibecomfy" not in imported_roots
     assert "Wan2GP" not in imported_roots
     assert "source" not in imported_roots
+
+
+def test_verified_facts_are_exact_hc02_shape_and_reject_policy_keys() -> None:
+    facts = validate_verified_facts(
+        {
+            "exact": {key: (8188 if key == "port" else key) for key in EXACT_FACT_KEYS},
+            "minimum": {key: 1 for key in MINIMUM_FACT_KEYS},
+        }
+    )
+
+    assert set(facts.to_dict()["exact"]) == set(EXACT_FACT_KEYS)
+    assert set(facts.to_dict()["minimum"]) == set(MINIMUM_FACT_KEYS)
+    with pytest.raises(ValueError, match="unsupported verified facts"):
+        validate_verified_facts({"exact": {"backend": "vibecomfy"}, "minimum": {}})

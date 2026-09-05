@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
+import sys
 from types import SimpleNamespace
 
 from source.runtime.worker import guardian
@@ -12,11 +14,13 @@ from source.runtime.worker.preflight import (
     PREFLIGHT_STATUS_PASSED,
     PreflightCheck,
     WorkerPreflightResult,
+    FactProbeOverrides,
     preflight_state_path,
     publish_preflight_metadata,
     run_worker_preflight,
     write_preflight_state,
 )
+from source.runtime.vibecomfy_profile import VerifiedFacts
 from source.runtime.worker.resource_pressure import ResourcePressureResult, write_resource_pressure_state
 
 
@@ -39,8 +43,59 @@ def _make_worker_repo(tmp_path):
     return repo_root, wan2gp
 
 
+def _configure_verified_facts(tmp_path, monkeypatch, repo_root):
+    runtime_lock = repo_root / "uv.lock"
+    runtime_lock.write_text("runtime lock\n", encoding="utf-8")
+    engine_lock = repo_root / "engine.lock"
+    engine_lock.write_text("engine lock\n", encoding="utf-8")
+
+    def _manifest(root_name, file_name, contents):
+        root = tmp_path / root_name
+        root.mkdir()
+        file_path = root / file_name
+        file_path.write_bytes(contents)
+        digest = hashlib.sha256(contents).hexdigest()
+        manifest = tmp_path / f"{root_name}.json"
+        manifest.write_text(
+            json.dumps({"files": [{"path": file_name, "sha256": f"sha256:{digest}"}]}),
+            encoding="utf-8",
+        )
+        return root, manifest
+
+    model_root, model_manifest = _manifest("models", "model.bin", b"model bytes")
+    custom_root, custom_manifest = _manifest("custom-nodes", "node.py", b"node bytes")
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    cas_root = tmp_path / "cas"
+    cas_root.mkdir()
+
+    monkeypatch.setenv("REIGH_INTERPRETER", sys.executable)
+    monkeypatch.setenv("REIGH_RUNTIME_LOCK_PATH", str(runtime_lock))
+    monkeypatch.setenv("REIGH_ENGINE_LOCK_PATH", str(engine_lock))
+    monkeypatch.setenv("REIGH_MODEL_ROOT", str(model_root))
+    monkeypatch.setenv("REIGH_MODEL_MANIFEST_PATH", str(model_manifest))
+    monkeypatch.setenv("REIGH_CUSTOM_NODE_ROOT", str(custom_root))
+    monkeypatch.setenv("REIGH_CUSTOM_NODE_MANIFEST_PATH", str(custom_manifest))
+    monkeypatch.setenv("REIGH_SCRATCH_ROOT", str(scratch_root))
+    monkeypatch.setenv("REIGH_CAS_ROOT", str(cas_root))
+    monkeypatch.setenv("REIGH_RUNTIME_HOST", "127.0.0.1")
+    monkeypatch.setenv("REIGH_RUNTIME_PORT", "18765")
+
+    return FactProbeOverrides(
+        gpu=lambda: {
+            "uuid": "GPU-fixture",
+            "name": "GPU fixture",
+            "driver": "550.1",
+            "cuda": "12.4",
+            "vram_bytes": 16 * 1024**3,
+        },
+        port=lambda host, port: {"ok": True, "detail": f"{host}:{port} fixture-owned"},
+    )
+
+
 def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
+    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
 
@@ -56,6 +111,7 @@ def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_pat
         wan2gp_path=wan2gp,
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
+        probes=probes,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -74,6 +130,71 @@ def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_pat
         "main_output_dir",
         "uv_cache_dir",
     }
+    assert set(result.verified_facts.exact) == {
+        "interpreter",
+        "runtime_lock",
+        "engine_lock",
+        "model_digest",
+        "custom_node_digest",
+        "driver",
+        "root",
+        "port",
+    }
+    assert set(result.verified_facts.minimum) == {"vram_bytes", "scratch_bytes"}
+    assert result.readiness == "ready"
+    assert result.to_metadata()["readiness_reason"] is None
+
+
+def test_worker_preflight_fails_closed_when_verified_model_bytes_drift(tmp_path, monkeypatch):
+    repo_root, wan2gp = _make_worker_repo(tmp_path)
+    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    (tmp_path / "models" / "model.bin").write_bytes(b"changed model bytes")
+
+    result = run_worker_preflight(
+        repo_root=repo_root,
+        wan2gp_path=wan2gp,
+        main_output_dir=tmp_path / "outputs",
+        backend="vibecomfy",
+        probes=probes,
+    )
+
+    assert result.status == "failed"
+    assert result.readiness == "not_ready"
+    assert "fact:model_digest" in result.failed_checks
+    assert result.verified_facts.exact.get("model_digest") is None
+
+
+def test_worker_preflight_fails_closed_without_fact_configuration(tmp_path, monkeypatch):
+    repo_root, wan2gp = _make_worker_repo(tmp_path)
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+    monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
+    monkeypatch.setattr(
+        "source.runtime.worker.preflight.importlib.util.find_spec",
+        lambda name: SimpleNamespace(origin=f"/fake/{name}.py"),
+    )
+
+    result = run_worker_preflight(
+        repo_root=repo_root,
+        wan2gp_path=wan2gp,
+        main_output_dir=tmp_path / "outputs",
+        backend="vibecomfy",
+        probes=FactProbeOverrides(
+            gpu=lambda: {
+                "uuid": "GPU-fixture",
+                "name": "GPU fixture",
+                "driver": "550.1",
+                "cuda": "12.4",
+                "vram_bytes": 16 * 1024**3,
+            },
+            port=lambda host, port: {"ok": True},
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.readiness == "not_ready"
+    assert "fact:engine_lock" in result.failed_checks
+    assert "fact:model_digest" in result.failed_checks
+    assert "model_digest" not in result.verified_facts.exact
 
 
 def test_worker_preflight_fails_when_wgp_path_is_missing(tmp_path, monkeypatch):
@@ -99,6 +220,7 @@ def test_worker_preflight_fails_when_wgp_path_is_missing(tmp_path, monkeypatch):
 
 def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
+    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.delenv("VIBECOMFY_PATH", raising=False)
     monkeypatch.delenv("REIGH_PREFLIGHT_REQUIRE_VIBECOMFY", raising=False)
@@ -112,6 +234,7 @@ def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, m
         wan2gp_path=wan2gp,
         main_output_dir=tmp_path / "outputs",
         backend="wgp",
+        probes=probes,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -121,6 +244,7 @@ def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, m
 
 def test_worker_preflight_does_not_require_wan2gp_for_vibecomfy_backend(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
+    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     shutil.rmtree(wan2gp)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
@@ -134,6 +258,7 @@ def test_worker_preflight_does_not_require_wan2gp_for_vibecomfy_backend(tmp_path
         wan2gp_path=wan2gp,
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
+        probes=probes,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -193,6 +318,7 @@ def test_worker_preflight_requires_sageattention_for_sage_profile(tmp_path, monk
 
 def test_worker_preflight_accepts_verified_sageattention_profile(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
+    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
     monkeypatch.setenv("REIGH_VIBECOMFY_ATTENTION_PROFILE", "sage")
@@ -207,6 +333,7 @@ def test_worker_preflight_accepts_verified_sageattention_profile(tmp_path, monke
         wan2gp_path=wan2gp,
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
+        probes=probes,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -253,6 +380,19 @@ def test_publish_preflight_metadata_merges_existing_metadata_and_ready_flag(tmp_
         checks=[PreflightCheck("wgp_import", True, "ok")],
         started_at=1.0,
         completed_at=2.0,
+        verified_facts=VerifiedFacts(
+            exact={
+                "interpreter": "python",
+                "runtime_lock": "runtime",
+                "engine_lock": "engine",
+                "model_digest": "model",
+                "custom_node_digest": "nodes",
+                "driver": "driver",
+                "root": "root",
+                "port": 8765,
+            },
+            minimum={"vram_bytes": 1, "scratch_bytes": 1},
+        ),
     )
 
     assert publish_preflight_metadata(
@@ -267,6 +407,7 @@ def test_publish_preflight_metadata_merges_existing_metadata_and_ready_flag(tmp_
     assert metadata["preflight_status"] == "passed"
     assert metadata["preflight_phase"] == "passed"
     assert metadata["ready_for_tasks"] is True
+    assert metadata["verified_facts_complete"] is True
     assert json.loads(preflight_state_path("worker-1").read_text(encoding="utf-8"))["preflight_status"] == "passed"
 
 

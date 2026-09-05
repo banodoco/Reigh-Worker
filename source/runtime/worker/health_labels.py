@@ -194,6 +194,9 @@ def queryable_telemetry_labels(worker_id: str) -> dict[str, Any]:
         "current_task_type": route["current_task_type"],
         "preflight_status": preflight["status"],
         "preflight_ok": preflight["ok"],
+        "preflight_readiness": preflight["readiness"],
+        "preflight_readiness_reason": preflight["readiness_reason"],
+        "preflight_verified_facts_digest": preflight["verified_facts_digest"],
         "disk_status": disk["status"],
         "disk_worst_used_pct": disk["worst_used_pct"],
         "resource_pressure_status": resource_pressure["status"],
@@ -210,6 +213,9 @@ def _preflight_labels(preflight: dict[str, Any] | None) -> dict[str, Any]:
         "status": preflight.get("preflight_status") or "unknown",
         "ok": bool(preflight.get("preflight_ok")),
         "failed_checks": list(preflight.get("preflight_failed_checks") or []),
+        "readiness": preflight.get("readiness") or "not_ready",
+        "readiness_reason": preflight.get("readiness_reason") or "",
+        "verified_facts_digest": preflight.get("verified_facts_digest") or "",
     }
 
 

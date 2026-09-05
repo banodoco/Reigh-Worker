@@ -7,11 +7,95 @@ package.  Keep this boundary to numeric CLI protocol data only.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 PROCESS_DEFAULT_PROFILE = -1
 VALID_MEMORY_PROFILES = frozenset((1, 2, 3, 4, 5))
+
+# This is the wire shape owned by Runtime HC-02.  Keep the Worker-side
+# representation deliberately boring: no backend, route, template, or engine
+# policy can be smuggled into verified facts.
+EXACT_FACT_KEYS = (
+    "interpreter",
+    "runtime_lock",
+    "engine_lock",
+    "model_digest",
+    "custom_node_digest",
+    "driver",
+    "root",
+    "port",
+)
+MINIMUM_FACT_KEYS = ("vram_bytes", "scratch_bytes")
+
+
+@dataclass(frozen=True)
+class VerifiedFacts:
+    """The secret-free, engine-neutral HC-02 fact payload."""
+
+    exact: Mapping[str, str | int]
+    minimum: Mapping[str, int]
+
+    def to_dict(self) -> dict[str, dict[str, str | int]]:
+        return {
+            "exact": dict(sorted(self.exact.items())),
+            "minimum": dict(sorted(self.minimum.items())),
+        }
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def empty_verified_facts() -> VerifiedFacts:
+    return VerifiedFacts(exact={}, minimum={})
+
+
+def validate_verified_facts(facts: VerifiedFacts | Mapping[str, Mapping[str, Any]]) -> VerifiedFacts:
+    """Validate and normalize the exact HC-02 shape without adding policy."""
+
+    if isinstance(facts, VerifiedFacts):
+        payload = facts.to_dict()
+    elif isinstance(facts, Mapping):
+        payload = dict(facts)
+    else:
+        raise ValueError("verified facts must be an object")
+
+    unknown_sections = set(payload) - {"exact", "minimum"}
+    if unknown_sections:
+        raise ValueError(f"unsupported verified fact sections: {sorted(unknown_sections)}")
+
+    raw_exact = payload.get("exact") or {}
+    raw_minimum = payload.get("minimum") or {}
+    if not isinstance(raw_exact, Mapping) or not isinstance(raw_minimum, Mapping):
+        raise ValueError("verified fact sections must be objects")
+    exact = dict(raw_exact)
+    minimum = dict(raw_minimum)
+    unknown_exact = set(exact) - set(EXACT_FACT_KEYS)
+    unknown_minimum = set(minimum) - set(MINIMUM_FACT_KEYS)
+    if unknown_exact or unknown_minimum:
+        unknown = sorted(unknown_exact | unknown_minimum)
+        raise ValueError(f"unsupported verified facts: {unknown}")
+
+    normalized_exact: dict[str, str | int] = {}
+    for key, value in exact.items():
+        if key == "port":
+            if isinstance(value, bool) or not isinstance(value, (str, int)) or not value or (isinstance(value, int) and value < 0):
+                raise ValueError("verified fact port must be a non-negative integer or non-empty string")
+        elif not isinstance(value, str) or not value:
+            raise ValueError(f"verified fact {key} must be a non-empty string")
+        normalized_exact[key] = value
+
+    normalized_minimum: dict[str, int] = {}
+    for key, value in minimum.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"verified fact {key} must be a non-negative integer")
+        normalized_minimum[key] = value
+
+    return VerifiedFacts(exact=normalized_exact, minimum=normalized_minimum)
 
 
 @dataclass(frozen=True)
