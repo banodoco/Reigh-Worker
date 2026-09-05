@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+
+import pytest
 
 from source.runtime.worker import guardian
 from source.runtime.worker.health_labels import write_worker_route_state
 from source.runtime.worker.preflight import (
     PREFLIGHT_STATUS_PASSED,
     PreflightCheck,
+    RuntimeBinding,
     WorkerPreflightResult,
     FactProbeOverrides,
+    _probe_runtime_binding,
+    _process_birth_identity,
+    finalize_preflight_result,
     preflight_state_path,
     publish_preflight_metadata,
     run_worker_preflight,
@@ -78,8 +87,7 @@ def _configure_verified_facts(tmp_path, monkeypatch, repo_root):
     monkeypatch.setenv("REIGH_CUSTOM_NODE_MANIFEST_PATH", str(custom_manifest))
     monkeypatch.setenv("REIGH_SCRATCH_ROOT", str(scratch_root))
     monkeypatch.setenv("REIGH_CAS_ROOT", str(cas_root))
-    monkeypatch.setenv("REIGH_RUNTIME_HOST", "127.0.0.1")
-    monkeypatch.setenv("REIGH_RUNTIME_PORT", "18765")
+    runtime_binding = _runtime_binding(tmp_path)
 
     return FactProbeOverrides(
         gpu=lambda: {
@@ -89,13 +97,244 @@ def _configure_verified_facts(tmp_path, monkeypatch, repo_root):
             "cuda": "12.4",
             "vram_bytes": 16 * 1024**3,
         },
-        port=lambda host, port: {"ok": True, "detail": f"{host}:{port} fixture-owned"},
+        runtime=lambda binding: {"ok": True, "detail": f"{binding.endpoint} injected verifier"},
+    ), runtime_binding
+
+
+def _runtime_binding(tmp_path, *, port=18765, **overrides):
+    credential_path = tmp_path / "runtime-worker.token"
+    credential_path.write_text("worker-token\n", encoding="utf-8")
+    credential_path.chmod(0o600)
+    values = {
+        "endpoint": f"http://127.0.0.1:{port}",
+        "port": port,
+        "pid": os.getpid(),
+        "process_birth_id": "fixture-process",
+        "runtime_instance_id": "fixture-runtime",
+        "runtime_epoch": 1,
+        "schema_digest": "sha256:" + "0" * 64,
+        "credential_path": credential_path,
+    }
+    values.update(overrides)
+    return RuntimeBinding(**values)
+
+
+def test_runtime_binding_verifies_live_listener_and_credentialed_health(tmp_path):
+    token = "worker-token"
+    digest = "sha256:" + "0" * 64
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            body = json.dumps(
+                {
+                    "status": "ok",
+                    "protocol": "workspace.v1",
+                    "schema_digest": digest,
+                    "runtime_epoch": 1,
+                }
+            ).encode()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    credential_path = tmp_path / "runtime.token"
+    credential_path.write_text(token, encoding="utf-8")
+    credential_path.chmod(0o600)
+    binding = RuntimeBinding(
+        endpoint=f"http://127.0.0.1:{server.server_port}",
+        port=server.server_port,
+        pid=os.getpid(),
+        process_birth_id=_process_birth_identity(os.getpid()),
+        runtime_instance_id="runtime-live",
+        runtime_epoch=1,
+        schema_digest=digest,
+        credential_path=credential_path,
     )
+    try:
+        assert _probe_runtime_binding(binding)["ok"] is True
+        assert seen == [f"Bearer {token}"]
+        parent_birth = _process_birth_identity(os.getppid())
+        if parent_birth:
+            unrelated = RuntimeBinding(
+                endpoint=binding.endpoint,
+                port=binding.port,
+                pid=os.getppid(),
+                process_birth_id=parent_birth,
+                runtime_instance_id=binding.runtime_instance_id,
+                runtime_epoch=binding.runtime_epoch,
+                schema_digest=binding.schema_digest,
+                credential_path=binding.credential_path,
+            )
+            with pytest.raises(OSError, match="owned by the bound process"):
+                _probe_runtime_binding(unrelated)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"port": 0, "endpoint": "http://127.0.0.1:0"}, "port"),
+        ({"endpoint": "http://127.0.0.1:18766"}, "match"),
+        ({"process_birth_id": "stale"}, "birth"),
+    ],
+)
+def test_runtime_binding_rejects_invalid_or_stale_identity(tmp_path, overrides, expected):
+    binding = _runtime_binding(tmp_path, **overrides)
+    with pytest.raises((OSError, ValueError), match=expected):
+        _probe_runtime_binding(binding)
+
+
+def test_runtime_binding_rejects_unused_port_without_creating_listener(tmp_path):
+    binding = _runtime_binding(tmp_path, port=18766, process_birth_id=_process_birth_identity(os.getpid()))
+    with pytest.raises(OSError, match="owned by the bound process"):
+        _probe_runtime_binding(binding)
+
+
+@pytest.mark.parametrize("health_override", [{"runtime_epoch": 2}, {"schema_digest": "sha256:" + "1" * 64}])
+def test_runtime_binding_rejects_mismatched_health(tmp_path, health_override):
+    expected_digest = "sha256:" + "0" * 64
+    health = {
+        "status": "ok",
+        "protocol": "workspace.v1",
+        "schema_digest": expected_digest,
+        "runtime_epoch": 1,
+    }
+    health.update(health_override)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps(health).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    binding = _runtime_binding(
+        tmp_path,
+        port=server.server_port,
+        endpoint=f"http://127.0.0.1:{server.server_port}",
+        pid=os.getpid(),
+        process_birth_id=_process_birth_identity(os.getpid()),
+        schema_digest=expected_digest,
+    )
+    try:
+        with pytest.raises(ValueError, match="identity"):
+            _probe_runtime_binding(binding)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_missing_runtime_binding_fails_closed_without_fallback(tmp_path, monkeypatch):
+    repo_root, wan2gp = _make_worker_repo(tmp_path)
+    called = False
+
+    def _runtime(_binding):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    result = run_worker_preflight(
+        repo_root=repo_root,
+        wan2gp_path=wan2gp,
+        main_output_dir=tmp_path / "outputs",
+        backend="vibecomfy",
+        probes=FactProbeOverrides(runtime=_runtime),
+    )
+    assert result.ready_for_tasks is False
+    assert "fact:port" in result.failed_checks
+    assert called is False
+
+
+def _complete_verified_facts():
+    return VerifiedFacts(
+        exact={
+            "interpreter": "python",
+            "runtime_lock": "runtime",
+            "engine_lock": "engine",
+            "model_digest": "model",
+            "custom_node_digest": "nodes",
+            "driver": "driver",
+            "root": "root",
+            "port": 8765,
+        },
+        minimum={"vram_bytes": 1, "scratch_bytes": 1},
+    )
+
+
+def test_readiness_validates_direct_facts_and_mapping_mutation_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("REIGH_PREFLIGHT_STATE_DIR", str(tmp_path))
+    facts = _complete_verified_facts()
+    result = WorkerPreflightResult(
+        status=PREFLIGHT_STATUS_PASSED,
+        checks=[],
+        started_at=1.0,
+        completed_at=2.0,
+        verified_facts=facts,
+    )
+    assert result.ready_for_tasks is True
+    facts.exact["port"] = "8765"
+    assert result.ready_for_tasks is False
+    metadata = result.to_metadata()
+    assert metadata["readiness"] == "not_ready"
+    assert metadata["verified_facts_complete"] is False
+    client = _FakeSupabase()
+    publish_preflight_metadata(
+        supabase_client=client,
+        worker_id="worker-invalid-facts",
+        result=result,
+        ready_for_tasks=True,
+    )
+    assert client.updated_payload["metadata"]["ready_for_tasks"] is False
+
+    facts.exact["port"] = 8765
+    facts.minimum["vram_bytes"] = -1
+    assert result.ready_for_tasks is False
+    assert result.to_metadata()["readiness_reason"].startswith("verified_facts_invalid:")
+
+
+def test_finalize_preserves_verified_facts_while_failed_readiness_stays_closed():
+    facts = _complete_verified_facts()
+    base = WorkerPreflightResult(
+        status=PREFLIGHT_STATUS_PASSED,
+        checks=[],
+        started_at=1.0,
+        completed_at=2.0,
+        verified_facts=facts,
+    )
+    final = finalize_preflight_result(
+        base,
+        extra_checks=[PreflightCheck("late_check", False, "failed")],
+    )
+    assert final.verified_facts is facts
+    assert final.verified_facts.to_dict() == base.verified_facts.to_dict()
+    assert final.ready_for_tasks is False
+    assert final.to_metadata()["verified_facts_digest"] == base.to_metadata()["verified_facts_digest"]
 
 
 def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
-    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    probes, runtime_binding = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
 
@@ -112,6 +351,7 @@ def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_pat
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
         probes=probes,
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -147,7 +387,7 @@ def test_worker_preflight_passes_when_required_paths_and_manifests_exist(tmp_pat
 
 def test_worker_preflight_fails_closed_when_verified_model_bytes_drift(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
-    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    probes, runtime_binding = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     (tmp_path / "models" / "model.bin").write_bytes(b"changed model bytes")
 
     result = run_worker_preflight(
@@ -156,6 +396,7 @@ def test_worker_preflight_fails_closed_when_verified_model_bytes_drift(tmp_path,
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
         probes=probes,
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == "failed"
@@ -166,6 +407,7 @@ def test_worker_preflight_fails_closed_when_verified_model_bytes_drift(tmp_path,
 
 def test_worker_preflight_fails_closed_without_fact_configuration(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
+    runtime_binding = _runtime_binding(tmp_path)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
     monkeypatch.setattr(
@@ -186,8 +428,9 @@ def test_worker_preflight_fails_closed_without_fact_configuration(tmp_path, monk
                 "cuda": "12.4",
                 "vram_bytes": 16 * 1024**3,
             },
-            port=lambda host, port: {"ok": True},
+            runtime=lambda binding: {"ok": True},
         ),
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == "failed"
@@ -220,7 +463,7 @@ def test_worker_preflight_fails_when_wgp_path_is_missing(tmp_path, monkeypatch):
 
 def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
-    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    probes, runtime_binding = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.delenv("VIBECOMFY_PATH", raising=False)
     monkeypatch.delenv("REIGH_PREFLIGHT_REQUIRE_VIBECOMFY", raising=False)
@@ -235,6 +478,7 @@ def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, m
         main_output_dir=tmp_path / "outputs",
         backend="wgp",
         probes=probes,
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -244,7 +488,7 @@ def test_worker_preflight_does_not_require_vibecomfy_for_wgp_backend(tmp_path, m
 
 def test_worker_preflight_does_not_require_wan2gp_for_vibecomfy_backend(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
-    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    probes, runtime_binding = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     shutil.rmtree(wan2gp)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
@@ -259,6 +503,7 @@ def test_worker_preflight_does_not_require_wan2gp_for_vibecomfy_backend(tmp_path
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
         probes=probes,
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED
@@ -318,7 +563,7 @@ def test_worker_preflight_requires_sageattention_for_sage_profile(tmp_path, monk
 
 def test_worker_preflight_accepts_verified_sageattention_profile(tmp_path, monkeypatch):
     repo_root, wan2gp = _make_worker_repo(tmp_path)
-    probes = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
+    probes, runtime_binding = _configure_verified_facts(tmp_path, monkeypatch, repo_root)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     monkeypatch.setenv("VIBECOMFY_PATH", str(tmp_path / "vibecomfy"))
     monkeypatch.setenv("REIGH_VIBECOMFY_ATTENTION_PROFILE", "sage")
@@ -334,6 +579,7 @@ def test_worker_preflight_accepts_verified_sageattention_profile(tmp_path, monke
         main_output_dir=tmp_path / "outputs",
         backend="vibecomfy",
         probes=probes,
+        runtime_binding=runtime_binding,
     )
 
     assert result.status == PREFLIGHT_STATUS_PASSED

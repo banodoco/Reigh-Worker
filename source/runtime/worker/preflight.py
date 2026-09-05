@@ -6,7 +6,6 @@ import importlib.util
 import hashlib
 import json
 import os
-import socket
 import subprocess
 import sys
 import shutil
@@ -14,15 +13,23 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from source.core.log import headless_logger
-from source.runtime.vibecomfy_profile import VerifiedFacts, empty_verified_facts, validate_verified_facts
+from source.runtime.vibecomfy_profile import (
+    RUNTIME_SAFE_INTEGER_MAX,
+    VerifiedFacts,
+    empty_verified_facts,
+    validate_verified_facts,
+)
 
 
 PREFLIGHT_STATUS_PENDING = "pending"
 PREFLIGHT_STATUS_RUNNING = "running"
 PREFLIGHT_STATUS_PASSED = "passed"
 PREFLIGHT_STATUS_FAILED = "failed"
+RUNTIME_PROTOCOL = "workspace.v1"
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,8 @@ class WorkerPreflightResult:
 
     @property
     def facts_complete(self) -> bool:
-        return set(self.verified_facts.exact) == {
+        facts, _ = self._validated_facts()
+        return facts is not None and set(facts.exact) == {
             "interpreter",
             "runtime_lock",
             "engine_lock",
@@ -61,7 +69,7 @@ class WorkerPreflightResult:
             "driver",
             "root",
             "port",
-        } and set(self.verified_facts.minimum) == {"vram_bytes", "scratch_bytes"}
+        } and set(facts.minimum) == {"vram_bytes", "scratch_bytes"}
 
     @property
     def ready_for_tasks(self) -> bool:
@@ -74,23 +82,46 @@ class WorkerPreflightResult:
     @property
     def readiness_reason(self) -> str | None:
         failed = self.failed_checks
-        return failed[0] if failed else (None if self.facts_complete else "verified_facts_incomplete")
+        if failed:
+            return failed[0]
+        _, invalid_reason = self._validated_facts()
+        return invalid_reason or (None if self.facts_complete else "verified_facts_incomplete")
 
     def to_metadata(self) -> dict[str, Any]:
+        facts, invalid_reason = self._validated_facts()
+        facts = facts or empty_verified_facts()
+        facts_complete = set(facts.exact) == {
+            "interpreter",
+            "runtime_lock",
+            "engine_lock",
+            "model_digest",
+            "custom_node_digest",
+            "driver",
+            "root",
+            "port",
+        } and set(facts.minimum) == {"vram_bytes", "scratch_bytes"}
+        ready_for_tasks = self.ok and invalid_reason is None and facts_complete
+        failed_checks = self.failed_checks
         return {
             "preflight_status": self.status,
             "preflight_ok": self.ok,
-            "preflight_failed_checks": self.failed_checks,
+            "preflight_failed_checks": failed_checks,
             "preflight_checks": [asdict(check) for check in self.checks],
             "preflight_started_at": self.started_at,
             "preflight_completed_at": self.completed_at,
             "preflight_phase": self.phase or self.status,
-            "readiness": self.readiness,
-            "readiness_reason": self.readiness_reason,
-            "verified_facts": self.verified_facts.to_dict(),
-            "verified_facts_digest": self.verified_facts.digest,
-            "verified_facts_complete": self.facts_complete,
+            "readiness": "ready" if ready_for_tasks else "not_ready",
+            "readiness_reason": failed_checks[0] if failed_checks else (None if ready_for_tasks else (invalid_reason or "verified_facts_incomplete")),
+            "verified_facts": facts.to_dict(),
+            "verified_facts_digest": facts.digest,
+            "verified_facts_complete": facts_complete,
         }
+
+    def _validated_facts(self) -> tuple[VerifiedFacts | None, str | None]:
+        try:
+            return validate_verified_facts(self.verified_facts), None
+        except (TypeError, ValueError) as exc:
+            return None, f"verified_facts_invalid: {exc}"
 
 
 @dataclass(frozen=True)
@@ -98,7 +129,25 @@ class FactProbeOverrides:
     """Optional test seams; production probes always inspect the host."""
 
     gpu: Callable[[], Mapping[str, Any]] | None = None
-    port: Callable[[str, int], Mapping[str, Any]] | None = None
+    runtime: Callable[["RuntimeBinding"], Mapping[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeBinding:
+    """The single Runtime endpoint handoff shared with Astrid's host.
+
+    B02-T03 must pass this object from Runtime discovery/launch materialization;
+    this Worker intentionally has no resolver for discovery, ports, or credentials.
+    """
+
+    endpoint: str
+    port: int
+    pid: int
+    process_birth_id: str
+    runtime_instance_id: str
+    runtime_epoch: int
+    schema_digest: str
+    credential_path: Path
 
 
 def collect_verified_facts(
@@ -106,6 +155,7 @@ def collect_verified_facts(
     repo_root: Path,
     main_output_dir: Path,
     probes: FactProbeOverrides | None = None,
+    runtime_binding: RuntimeBinding | None = None,
 ) -> tuple[VerifiedFacts, list[PreflightCheck]]:
     """Collect only independently verifiable, HC-02-shaped host facts.
 
@@ -213,19 +263,30 @@ def collect_verified_facts(
     if len(roots) == 5:
         exact["root"] = _canonical_digest(roots)
 
-    host = os.environ.get("REIGH_RUNTIME_HOST", "127.0.0.1").strip()
-    raw_port = os.environ.get("REIGH_RUNTIME_PORT", "8765")
-    try:
-        port = int(raw_port)
-        if port < 0 or port > 65535:
-            raise ValueError("port is outside 0..65535")
-        port_info = dict((probes.port or _probe_port)(host, port))
-        if not port_info.get("ok"):
-            raise OSError(str(port_info.get("detail") or "port is not free or owned"))
-        exact["port"] = port
-        checks.append(PreflightCheck("fact:port", True, str(port_info.get("detail") or f"{host}:{port}")))
-    except (OSError, TypeError, ValueError) as exc:
-        checks.append(PreflightCheck("fact:port", False, str(exc)))
+    if runtime_binding is None:
+        checks.append(
+            PreflightCheck(
+                "fact:port",
+                False,
+                "explicit Runtime binding is required; B02-T03 must pass the binding consumed by Astrid",
+            )
+        )
+    else:
+        try:
+            _validate_runtime_binding(runtime_binding)
+            port_info = dict((probes.runtime or _probe_runtime_binding)(runtime_binding))
+            if not port_info.get("ok"):
+                raise OSError(str(port_info.get("detail") or "Runtime binding verification failed"))
+            exact["port"] = runtime_binding.port
+            checks.append(
+                PreflightCheck(
+                    "fact:port",
+                    True,
+                    str(port_info.get("detail") or runtime_binding.endpoint),
+                )
+            )
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError) as exc:
+            checks.append(PreflightCheck("fact:port", False, str(exc)))
 
     try:
         facts = validate_verified_facts({"exact": exact, "minimum": minimum})
@@ -242,6 +303,7 @@ def run_worker_preflight(
     main_output_dir: Path,
     backend: str,
     probes: FactProbeOverrides | None = None,
+    runtime_binding: RuntimeBinding | None = None,
 ) -> WorkerPreflightResult:
     started_at = time.time()
     checks: list[PreflightCheck] = []
@@ -286,6 +348,7 @@ def run_worker_preflight(
         repo_root=repo_root,
         main_output_dir=main_output_dir,
         probes=probes,
+        runtime_binding=runtime_binding,
     )
     checks.extend(fact_checks)
 
@@ -479,14 +542,103 @@ def _gpu_driver_identity(gpu: Mapping[str, Any]) -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 
-def _probe_port(host: str, port: int) -> Mapping[str, Any]:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind((host, port))
-        except OSError as exc:
-            return {"ok": False, "detail": f"{host}:{port}: {exc}"}
-    return {"ok": True, "detail": f"{host}:{port} is free"}
+def _probe_runtime_binding(binding: RuntimeBinding) -> Mapping[str, Any]:
+    _validate_runtime_binding(binding)
+    if _process_birth_identity(binding.pid) != binding.process_birth_id:
+        raise OSError("Runtime process birth identity is stale or mismatched")
+    listener = subprocess.run(
+        [
+            "lsof",
+            "-nP",
+            "-a",
+            "-p",
+            str(binding.pid),
+            "-iTCP:" + str(binding.port),
+            "-sTCP:LISTEN",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=2,
+    )
+    if listener.returncode != 0 or f":{binding.port} (LISTEN)" not in listener.stdout:
+        raise OSError("Runtime endpoint is not owned by the bound process")
+
+    credential = binding.credential_path.read_text(encoding="utf-8").strip()
+    request = Request(
+        binding.endpoint.rstrip("/") + "/v1/health",
+        headers={"Authorization": f"Bearer {credential}", "Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(request, timeout=3) as response:
+        health = json.loads(response.read().decode("utf-8"))
+    if not isinstance(health, Mapping):
+        raise ValueError("Runtime health response must be an object")
+    expected = {
+        "status": "ok",
+        "protocol": RUNTIME_PROTOCOL,
+        "schema_digest": binding.schema_digest,
+        "runtime_epoch": binding.runtime_epoch,
+    }
+    if any(health.get(key) != value for key, value in expected.items()):
+        raise ValueError("Runtime health identity does not match the explicit binding")
+    return {"ok": True, "detail": f"{binding.endpoint} verified for Runtime instance {binding.runtime_instance_id}"}
+
+
+def _validate_runtime_binding(binding: RuntimeBinding) -> None:
+    if not isinstance(binding.endpoint, str) or not binding.endpoint:
+        raise ValueError("Runtime endpoint is required")
+    parsed = urlsplit(binding.endpoint)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Runtime endpoint must be an HTTP loopback URL")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise ValueError("Runtime endpoint must not contain path, query, fragment, or userinfo")
+    if isinstance(binding.port, bool) or not isinstance(binding.port, int) or not 1 <= binding.port <= 65535:
+        raise ValueError("Runtime binding port must be an integer in 1..65535")
+    if parsed.port != binding.port:
+        raise ValueError("Runtime endpoint port does not match the explicit binding")
+    if isinstance(binding.pid, bool) or not isinstance(binding.pid, int) or binding.pid <= 0:
+        raise ValueError("Runtime binding PID must be a positive integer")
+    for name in ("process_birth_id", "runtime_instance_id", "schema_digest"):
+        value = getattr(binding, name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Runtime binding {name} must be a non-empty string")
+    if binding.schema_digest[:7] != "sha256:" or len(binding.schema_digest) != 71:
+        raise ValueError("Runtime binding schema_digest must be a SHA-256 identity")
+    if isinstance(binding.runtime_epoch, bool) or not isinstance(binding.runtime_epoch, int) or not 1 <= binding.runtime_epoch <= RUNTIME_SAFE_INTEGER_MAX:
+        raise ValueError("Runtime binding epoch must be an integer in 1..2^53-1")
+    credential_path = binding.credential_path
+    if not isinstance(credential_path, Path) or not credential_path.is_absolute() or credential_path.is_symlink() or not credential_path.is_file():
+        raise ValueError("Runtime credential path must be an absolute regular file")
+    if credential_path.stat().st_mode & 0o777 != 0o600:
+        raise ValueError("Runtime credential file must be owner-only")
+    if not credential_path.read_text(encoding="utf-8").strip():
+        raise ValueError("Runtime credential is empty")
+
+
+def _process_birth_identity(pid: int) -> str | None:
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        raw = stat_path.read_text(encoding="utf-8")
+        fields = raw.rsplit(")", 1)[-1].split()
+        if len(fields) >= 20:
+            return f"proc-start-ticks:{fields[19]}"
+    except (OSError, ValueError):
+        pass
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1,
+        )
+        rendered = result.stdout.strip()
+        if result.returncode == 0 and rendered:
+            return f"ps-lstart:{rendered}"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 def _wan2gp_preflight_required(backend: str) -> bool:

@@ -9,6 +9,7 @@ from source.runtime.vibecomfy_profile import (
     EXACT_FACT_KEYS,
     MINIMUM_FACT_KEYS,
     PROCESS_DEFAULT_PROFILE,
+    RUNTIME_SAFE_INTEGER_MAX,
     VibeComfyProfileProtocol,
     build_memory_profile_cli_args,
     build_profile_protocol,
@@ -96,3 +97,21 @@ def test_verified_facts_are_exact_hc02_shape_and_reject_policy_keys() -> None:
     assert set(facts.to_dict()["minimum"]) == set(MINIMUM_FACT_KEYS)
     with pytest.raises(ValueError, match="unsupported verified facts"):
         validate_verified_facts({"exact": {"backend": "vibecomfy"}, "minimum": {}})
+
+
+@pytest.mark.parametrize("bad_port", ["8188", True, False, 0, -1, 65536])
+def test_verified_facts_require_runtime_safe_numeric_port(bad_port: object) -> None:
+    with pytest.raises(ValueError, match="port"):
+        validate_verified_facts({"exact": {"port": bad_port}, "minimum": {}})
+
+
+@pytest.mark.parametrize("bad_capacity", [True, -1, RUNTIME_SAFE_INTEGER_MAX + 1])
+def test_verified_facts_require_runtime_safe_capacities(bad_capacity: object) -> None:
+    with pytest.raises(ValueError, match="vram_bytes"):
+        validate_verified_facts({"exact": {}, "minimum": {"vram_bytes": bad_capacity}})
+
+
+@pytest.mark.parametrize("bad_section", [None, "", [], 0])
+def test_verified_facts_do_not_coerce_malformed_sections(bad_section: object) -> None:
+    with pytest.raises(ValueError, match="sections"):
+        validate_verified_facts({"exact": bad_section, "minimum": {}})

@@ -29,6 +29,7 @@ EXACT_FACT_KEYS = (
     "port",
 )
 MINIMUM_FACT_KEYS = ("vram_bytes", "scratch_bytes")
+RUNTIME_SAFE_INTEGER_MAX = 2**53 - 1
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def validate_verified_facts(facts: VerifiedFacts | Mapping[str, Mapping[str, Any
     """Validate and normalize the exact HC-02 shape without adding policy."""
 
     if isinstance(facts, VerifiedFacts):
-        payload = facts.to_dict()
+        payload = {"exact": facts.exact, "minimum": facts.minimum}
     elif isinstance(facts, Mapping):
         payload = dict(facts)
     else:
@@ -68,8 +69,8 @@ def validate_verified_facts(facts: VerifiedFacts | Mapping[str, Mapping[str, Any
     if unknown_sections:
         raise ValueError(f"unsupported verified fact sections: {sorted(unknown_sections)}")
 
-    raw_exact = payload.get("exact") or {}
-    raw_minimum = payload.get("minimum") or {}
+    raw_exact = payload.get("exact", {})
+    raw_minimum = payload.get("minimum", {})
     if not isinstance(raw_exact, Mapping) or not isinstance(raw_minimum, Mapping):
         raise ValueError("verified fact sections must be objects")
     exact = dict(raw_exact)
@@ -83,16 +84,16 @@ def validate_verified_facts(facts: VerifiedFacts | Mapping[str, Mapping[str, Any
     normalized_exact: dict[str, str | int] = {}
     for key, value in exact.items():
         if key == "port":
-            if isinstance(value, bool) or not isinstance(value, (str, int)) or not value or (isinstance(value, int) and value < 0):
-                raise ValueError("verified fact port must be a non-negative integer or non-empty string")
-        elif not isinstance(value, str) or not value:
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+                raise ValueError("verified fact port must be an integer in 1..65535")
+        elif not isinstance(value, str) or not value.strip():
             raise ValueError(f"verified fact {key} must be a non-empty string")
         normalized_exact[key] = value
 
     normalized_minimum: dict[str, int] = {}
     for key, value in minimum.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"verified fact {key} must be a non-negative integer")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= RUNTIME_SAFE_INTEGER_MAX:
+            raise ValueError(f"verified fact {key} must be an integer in 0..{RUNTIME_SAFE_INTEGER_MAX}")
         normalized_minimum[key] = value
 
     return VerifiedFacts(exact=normalized_exact, minimum=normalized_minimum)
